@@ -337,7 +337,8 @@ class Graph:
                 if i < self.nstages - 1:
                     assert t[b_id] >= t[self.get_id(1, i + 1, j)] + comm + b_cost
 
-        # print(order)
+        print('manual_order')
+        print(order)
         best_time = 0
         for i in range(self.nstages):
             time_i = (
@@ -579,7 +580,7 @@ def ilp_results(graph, F):
         _cost = graph.get_cost(_id)
         post_validation_time = max(post_validation_time, end_time[_id] - _cost - graph.config.cost_comm)
         # post_validation_time = 0
-        # print(i, pv_id, post_validation_time)
+        print(i, pv_id, post_validation_time)
         for it in ["RECV_", "SEND_", ""]:
             if i == 0 and it == "SEND_":
                 continue

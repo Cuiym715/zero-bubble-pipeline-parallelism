@@ -207,6 +207,8 @@ class BlendedMegatronDatasetBuilder(object):
 
         megatron_datasets = []
         for i, _split in enumerate(Split):
+            if torch.distributed.get_rank() == 0:
+                print(f"i: {i}, _split: {_split}, sizes[i]: {sizes[i]}")
             if split[i] == 0.0:
                 megatron_datasets.append(None)
             else:

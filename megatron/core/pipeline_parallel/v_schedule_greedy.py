@@ -3,6 +3,7 @@
 # The reordering is based on a greedy algorithm.
 
 from dataclasses import dataclass
+import torch
 
 @dataclass(eq=True, frozen=True)
 class ScheduledNode:
@@ -28,6 +29,16 @@ class PipelineGraph(object):
         self.w_cost = w_cost
         self.c_cost = c_cost
         self.fbw_cost = [f_cost, b_cost, w_cost]
+        
+    def stable_pattern_zb(self, num_stages):
+        schedule = []
+        for i in range(num_stages):
+            schedule.append([i * 4,
+                            num_stages * 6 - i - 2,
+                            num_stages * 6 + i * 2 - 1,
+                            num_stages * 12 - i - 2
+                            ])
+        return schedule
     
     def stable_pattern_v_min(self, num_stages):
         interval = 2 if num_stages % 3 == 0 else 0
@@ -38,6 +49,8 @@ class PipelineGraph(object):
                             num_stages * 2 + interval + i,
                             num_stages * 4 + interval - i - 1
                             ])
+        if torch.distributed.get_rank() == 2:
+            print('stable pattern of vmin schedule', schedule)
         return schedule
 
     def stable_pattern_v_half(self, num_stages):
@@ -49,6 +62,8 @@ class PipelineGraph(object):
                             num_stages * 3 + interval + i * 2 - 1,
                             num_stages * 6 + interval - i  -2
                             ])
+        if torch.distributed.get_rank() == 2:
+            print('stable pattern of vhalf schedule', schedule)
         return schedule
 
     def put_w(self, schedule, split_w = False):
@@ -247,6 +262,7 @@ class PipelineGraph(object):
         schedulefunc = {
             'min': self.stable_pattern_v_min,
             'half': self.stable_pattern_v_half,
+            'zb': self.stable_pattern_zb
         }
         max_time, start_time, stage_order = self.schedule_from_pattern(
             schedulefunc[self.mem_config](self.n_stage), self.n_micro,

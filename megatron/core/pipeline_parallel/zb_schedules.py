@@ -194,6 +194,8 @@ class ZeroBubbleVPipeScheduler:
         self.do_post_validation = False
         self.is_first_run = True
         self.optimizer = None
+        
+        self.flag_debug = 0
     def _free_buffers(self):
         # two dim array, first dim is the model chunk, second dim is the microbatch queue
         self.input_tensors = [[], []]
@@ -321,6 +323,9 @@ class ZeroBubbleVPipeScheduler:
             self.flush()
 
     def schedule_f(self, scheduled_node):
+        # print(f"rank {torch.distributed.get_rank()} schedule_f {scheduled_node.chunk} {scheduled_node.minibatch}")
+        if self.config.timers is not None:
+            self.config.timers('computeF', log_level=2).start()
         if core.parallel_state.is_pipeline_first_stage():
             input_tensor = None
         elif scheduled_node.chunk == 1 and core.parallel_state.is_pipeline_last_stage(
@@ -370,9 +375,14 @@ class ZeroBubbleVPipeScheduler:
         if not self.forward_only:
             self.input_tensors[scheduled_node.chunk].append(input_tensor)
             self.output_tensors[scheduled_node.chunk].append(output_tensor)
+        if self.config.timers is not None:
+            self.config.timers('computeF').stop()
 
     def schedule_b(self, scheduled_node):
         if not self.forward_only:
+            # print(f"rank {torch.distributed.get_rank()} schedule_b {scheduled_node.chunk} {scheduled_node.minibatch}")
+            if self.config.timers is not None:
+                self.config.timers('computeB', log_level=2).start()
             input_tensor = self.input_tensors[scheduled_node.chunk].pop(0)
             output_tensor = self.output_tensors[scheduled_node.chunk].pop(0)
 
@@ -412,9 +422,14 @@ class ZeroBubbleVPipeScheduler:
                     self.send_backward_buffer[scheduled_node.chunk].append(
                         input_tensor_grad)
             WeightGradStore.flush(chunk=scheduled_node.chunk)
+            if self.config.timers is not None:
+                self.config.timers('computeB').stop()
 
     def schedule_w(self, scheduled_node, non_w_pending):
         if not self.forward_only:
+            # print(f"rank {torch.distributed.get_rank()} schedule_w {scheduled_node.chunk} {scheduled_node.minibatch}")
+            if self.config.timers is not None:
+                self.config.timers('computeW', log_level=2).start()
             chunk = scheduled_node.chunk
 
             if non_w_pending and scheduled_node.minibatch != self.num_microbatches - 1:
@@ -442,8 +457,12 @@ class ZeroBubbleVPipeScheduler:
                 if get_args().profile:
                     torch.cuda.nvtx.range_pop()  # W
                 self.w_clear_run[chunk] = True
+            if self.config.timers is not None:
+                self.config.timers('computeW').stop()
 
     def run_until_post_validation(self):
+        print_rank_0("run until post validation")
+        print_rank_0(f"schedules: {self.schedules}")
         optimizer = self.optimizer
         updated, grad_norm, rollback, succeed = None, None, None, None
         it = 0
@@ -521,6 +540,14 @@ class ZeroBubbleVPipeScheduler:
         return updated, grad_norm, rollback
 
     def run(self):
+        # print_rank_0(f"run {self.flag_debug}")
+        # if torch.distributed.get_rank() == 0:
+        #     self.flag_debug += 1
+        #     if self.flag_debug > 0:
+        #         for node in self.schedules:
+        #             print(f"{node.type}-{node.minibatch}", end=', ')
+        #         print()
+        
         self.disable_grad_sync()
 
         if get_args().profile:
@@ -678,6 +705,11 @@ class ZeroBubbleVPipeScheduler:
         self.run_timer = run_timer
 
         self.schedules = schedule
+        # if torch.distributed.get_rank() == 0:
+        #     print('prepare')
+        #     for node in self.schedules:
+        #         print(f"{node.type}-{node.minibatch}", end=', ')
+        #     print()
         self.forward_step_func = forward_step_func
         self.data_iterator = data_iterator
         self.model = model
@@ -1241,6 +1273,11 @@ def update_schedule(scheduler, f: List[int], b: List[int], w: List[int],
         schedule = list(filter(lambda x: x is not None, ag_result))
         assert len(schedule) == 1
         schedule = schedule[0]
+    if torch.distributed.get_rank() == 0:
+        print("updated schedule")
+        for node in schedule[0]:
+            print(f"{node.type}-{node.minibatch}", end=', ')
+        print()
     return schedule
 
 
@@ -1248,16 +1285,19 @@ def get_zero_bubble_forward_backward_func():
     pipeline_model_parallel_size = parallel_state.get_pipeline_model_parallel_world_size()
     assert pipeline_model_parallel_size > 1, "zero bubble must be enabled with pipeline parallelism"
 
+    print_rank_0("@_@: get zero bubble forward backward func")
     args = get_args()
     hidden_size = args.hidden_size
     num_attention_heads = args.num_attention_heads
     seq_length = args.seq_length
+    # TODO：确认正确性
     f_mem_approx = 34 * hidden_size + 5 * num_attention_heads * seq_length
     w_mem_approx = - 32 * hidden_size
     b_mem_approx = - f_mem_approx - w_mem_approx
 
     def wrapped_auto_schedule_forward_backward_func(func, scheduler):
         global schedule, is_auto_schedule
+        # print_rank_0(f"log@_@: wrapped_auto_schedule_forward_backward_func, schedule: {schedule}, scheduler: {scheduler}")
         if schedule is None:
             schedule = update_schedule(scheduler,
                 f=[1000],
@@ -1307,10 +1347,17 @@ def get_zero_bubble_forward_backward_func():
             return func(
                 schedule=schedule[parallel_state.get_pipeline_model_parallel_rank()], **kwargs
             )
+            
+        # if torch.distributed.get_rank() == 0:
+        #     print(f"rank {torch.distributed.get_rank()} Using schedule: ")
+        #     for node in schedule[parallel_state.get_pipeline_model_parallel_rank()]:
+        #         print(f"{node.type}-{node.minibatch}", end=', ')
+        #     print()
         return wrap_schedule
 
     if parallel_state.get_virtual_pipeline_model_parallel_world_size() is not None:
         def scheduler(nstages, nmb, f, b, w, c, f_mem, b_mem, w_mem, mem_limit):
+            print_rank_0("log@_@: using virtualpp scheduler")
             def avg_then_mid(a: List[List[float]]):
                 a = [sum(x) / len(x) for x in a]
                 return max(sorted(a)[len(a) // 2], 1)
@@ -1320,10 +1367,14 @@ def get_zero_bubble_forward_backward_func():
             w_mid = avg_then_mid(w)
             if get_args().zero_bubble_v_schedule_mem_setup != 'zb':
                 # Use fixed schedule for now
+                if torch.distributed.get_rank() == 2:
+                    print(f"log@_@: Using fixed vzb schedule")
                 ret = v_schedule_greedy.PipelineGraph(
                     nstages, nmb, get_args().zero_bubble_v_schedule_mem_setup, int(1000), int(1000), int(1000), int(1)
                 ).get_schedule()
                 return ret
+            if torch.distributed.get_rank() == 2:
+                print(f"log@_@: Using other vzb schedule")
             return v_schedule.PipelineGraph(
                 nstages,
                 nmb,
@@ -1334,6 +1385,9 @@ def get_zero_bubble_forward_backward_func():
                 # Mem ignored for now
             ).get_v_schedule()
         if get_args().zero_bubble_v_schedule:
+            if torch.distributed.get_rank() == 0:
+                global schedule
+                # print(f"log@_@: Using vzb schedule, schedule: {schedule}")
             global_zb_scheduler = get_zb_scheduler_instance()
             forward_backward_func = wrapped_auto_schedule_forward_backward_func(global_zb_scheduler, scheduler=scheduler)
             # forward_backward_func = wrapped_auto_schedule_forward_backward_func(forward_backward_pipelining_with_interleaving_auto_schedule,
@@ -1374,7 +1428,8 @@ def get_zero_bubble_forward_backward_func():
                     print_scaling=1000
                 ),
             )
-
+        if torch.distributed.get_rank() == 0:
+            print(f"log@_@: Using zb schedule")
         global_zb_scheduler = get_zb_scheduler_instance()
         forward_backward_func = wrapped_auto_schedule_forward_backward_func(global_zb_scheduler, scheduler=scheduler)
 

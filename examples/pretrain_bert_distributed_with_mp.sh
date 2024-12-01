@@ -10,9 +10,11 @@ NNODES=1
 NODE_RANK=0
 WORLD_SIZE=$(($GPUS_PER_NODE*$NNODES))
 
-CHECKPOINT_PATH=<Specify path>
-VOCAB_FILE=<Specify path to file>/bert-vocab.txt
-DATA_PATH=<Specify path and file prefix>_text_sentence
+CHECKPOINT_PATH=/workspace/workspace/model/bert/test
+# VOCAB_FILE=<Specify path to file>/bert-vocab.txt
+# DATA_PATH=<Specify path and file prefix>_text_sentence
+VOCAB_FILE=/workspace/workspace/data/bert/bert-vocab.txt
+DATA_PATH=/workspace/workspace/data/bert/corpus_indexed_text_sentence
 
 DISTRIBUTED_ARGS="
     --nproc_per_node $GPUS_PER_NODE \

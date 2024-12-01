@@ -229,6 +229,9 @@ def _initialize_distributed():
                 args.local_rank = device
             torch.cuda.set_device(device)
         # Call the init process
+        # TODO: add support for other backends
+        # 不是很懂为什么zerobubble要用不同的backend
+        # backend = args.distributed_backend
         if args.enable_zero_bubble:
             print(f"init process group {args.rank} of {args.world_size}")
             assert args.distributed_backend == "nccl"

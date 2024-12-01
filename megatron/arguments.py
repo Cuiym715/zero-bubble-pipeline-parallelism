@@ -55,6 +55,8 @@ def parse_args(extra_args_provider=None, ignore_unknown_args=False):
 
     # Args from environment
     args.rank = int(os.getenv('RANK', '0'))
+    args.rank = int(os.getenv('OMPI_COMM_WORLD_RANK', args.rank))
+    print(f'~~~~~~~rank: {args.rank}~~~~~~~')
     args.world_size = int(os.getenv("WORLD_SIZE", '1'))
 
     return args
@@ -698,6 +700,8 @@ def _add_logging_args(parser):
                        help='If set, calculate and log parameters norm.')
     group.add_argument('--log-num-zeros-in-grad', action='store_true',
                        help='If set, calculate and log the number of zeros in gradient.')
+    group.add_argument('--timers-save', type=str, default=None,
+                       help='Output directory to save timers log to.')
     group.add_argument('--timing-log-level', type=int,
                        default=0, choices=range(0,3),
                        help='Granularity level to measure and report timing. '
@@ -1169,6 +1173,9 @@ def _add_distributed_args(parser):
                        '--tensor-model-parallel-size instead.')
     group.add_argument('--num-layers-per-virtual-pipeline-stage', type=int, default=None,
                        help='Number of layers per virtual pipeline stage')
+    group.add_argument('--use-gpipe', action='store_true',
+                       help='use gpipe parallelism',
+                       dest='use_gpipe')
     group.add_argument('--no-overlap-p2p-communication', action='store_false',
                        help='overlap pipeline parallel communication with forward and backward chunks',
                        dest='overlap_p2p_comm')

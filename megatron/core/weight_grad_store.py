@@ -5,7 +5,7 @@ from megatron import get_args, get_timers
 from megatron.core import parallel_state
 from megatron.core.distributed.finalize_model_grads import _allreduce_embedding_grads
 from megatron.core.utils import get_model_config, get_attr_wrapped_model
-
+import torch
 
 class WeightGradStore:
 
@@ -19,6 +19,8 @@ class WeightGradStore:
 
     @classmethod
     def flush(cls, chunk=0):
+        # if torch.distributed.get_rank() == 0:
+        #     print(f"flush cache: {cls.cache}")
         cls.weight_grad_queue[chunk].put(cls.cache)
         cls.cache = []
 
@@ -26,6 +28,8 @@ class WeightGradStore:
     def pop(cls, chunk=0):
         if cls.weight_grad_queue[chunk].qsize() > 0:
             stored_grads = cls.weight_grad_queue[chunk].get()
+            # if torch.distributed.get_rank() == 0:
+            #     print(f"pop cache: {stored_grads}")
             for total_input, grad_output, weight, func in stored_grads:
                 func(total_input, grad_output, weight.main_grad)
         else:

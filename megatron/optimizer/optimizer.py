@@ -90,14 +90,16 @@ class MegatronOptimizer(ABC):
     def record_grad_norm(self, grad_norm):
         if self.post_validation_enabled:
             return
+        # print_rank_0(f"log@_@: grad_norm: {grad_norm}, grad_norm_no_clip_recorder: {self.grad_norm_no_clip_recorder}")
         if self.clip_grad > 0.0:
+            # print_rank_0(f"grad_norm_no_clip_recorder: {self.grad_norm_no_clip_recorder}")
             if grad_norm is None or grad_norm > self.clip_grad:
                 self.grad_norm_no_clip_recorder = 0
             else:
                 self.grad_norm_no_clip_recorder += 1
-            if self.grad_norm_no_clip_recorder >= 10:
+            if self.grad_norm_no_clip_recorder >= 10: # 10
                 rank = parallel_state.get_pipeline_model_parallel_rank()
-                print(f"{rank}: enable optimizer post validation")
+                # print(f"{rank}: enable optimizer post validation")
                 self.post_validation_enabled = True
         else:
             if grad_norm is not None:
@@ -574,6 +576,7 @@ class MixedPrecisionOptimizer(MegatronOptimizer):
 
         # recv global states to prev rank
         # self.recv_all()
+        print(f"{rank} pre_step: {self.get_found_inf_flag()}, {local_norm}")
         self.recv_pre_step()
         prev_found_inf_flag, this_found_inf_flag = False, False
         if self.grad_scaler:
@@ -594,6 +597,7 @@ class MixedPrecisionOptimizer(MegatronOptimizer):
 
         # send global states to next rank
         # self.send_all()
+        print(f"{rank} pre_step: {prev_found_inf_flag}, {prev_clip_coeff} -> {this_found_inf_flag}, {this_clip_coeff}")
         self.send_pre_step()
 
         def can_local_step(found_inf_flag, clip_coeff):
@@ -610,7 +614,7 @@ class MixedPrecisionOptimizer(MegatronOptimizer):
             return True
         self.do_prev_step = can_local_step(prev_found_inf_flag, prev_clip_coeff)
         self.do_this_step = can_local_step(this_found_inf_flag, this_clip_coeff)
-        # print(f"{rank} pre_step: {prev_found_inf_flag}, {prev_clip_coeff} -> {self.do_prev_step} | {this_found_inf_flag}, {this_clip_coeff} -> {self.do_this_step}")
+        print(f"{rank} pre_step: {prev_found_inf_flag}, {prev_clip_coeff} -> {self.do_prev_step} | {this_found_inf_flag}, {this_clip_coeff} -> {self.do_this_step}")
         timers('optimizer-local-step', log_level=1).start(
             barrier=args.barrier_with_L1_time)
         if self.do_this_step:

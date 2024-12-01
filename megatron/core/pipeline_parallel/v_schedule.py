@@ -417,6 +417,12 @@ class PipelineGraph(object):
             for node in local_order_with_rollback[rank]:
                 print(f"{node.type}-{node.minibatch}-{int(node.rollback)}", end=', ')
             print()
+           
+        print("v schedule") 
+        # for rank in range(self.n_stage):
+        #     for node in local_order_with_rollback[rank]:
+        #         print(f"{node.type}-{node.minibatch}", end=', ')
+        #     print()
 
         return local_order_with_rollback
 

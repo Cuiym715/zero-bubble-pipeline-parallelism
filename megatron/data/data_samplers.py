@@ -40,6 +40,9 @@ def build_pretraining_data_loader(dataset, consumed_samples):
                 args.dataloader_type))
 
     # Torch dataloader.
+    if torch.distributed.get_rank() == 0:
+        print('> building pretraining data loader ...')
+        print(f"batch sampler: {batch_sampler}")
     return torch.utils.data.DataLoader(dataset,
                                        batch_sampler=batch_sampler,
                                        num_workers=args.num_workers,

@@ -433,6 +433,8 @@ class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
 
         if ctx.gradient_accumulation_fusion:
             if get_args().enable_zero_bubble:
+                # if torch.distributed.get_rank() == 0:
+                #     print("log@_@: pass W")
                 from megatron.core.weight_grad_store import WeightGradStore
                 if weight.main_grad.dtype == torch.float32:
                     WeightGradStore.put(
@@ -451,6 +453,8 @@ class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
                 else:
                     raise RuntimeError("Unsupported gradient type for gradient accumulation fusion")
             else:
+                # if torch.distributed.get_rank() == 0:
+                #     print("log@_@: compute W")
                 if weight.main_grad.dtype == torch.float32:
                     fused_weight_gradient_mlp_cuda.wgrad_gemm_accum_fp32(
                         total_input, grad_output, weight.main_grad)

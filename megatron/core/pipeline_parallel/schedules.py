@@ -6,7 +6,7 @@ from typing import Callable, Iterator, List, Optional, Union
 import torch
 from torch.autograd.variable import Variable
 
-from megatron import core, get_args
+from megatron import core, get_args, print_rank_0
 from megatron.core import parallel_state
 from megatron.core.enums import ModelType
 from megatron.core.pipeline_parallel import p2p_communication
@@ -101,6 +101,7 @@ def get_forward_backward_func():
             forward_backward_func = forward_backward_pipelining_without_interleaving
     else:
         forward_backward_func = forward_backward_no_pipelining
+    # print_rank_0(f"log@_@: Using forward_backward_func: {forward_backward_func.__name__}")
     return forward_backward_func
 
 
@@ -336,8 +337,8 @@ def forward_backward_no_pipelining(
         data_iterator = data_iterator[0]
 
     config = get_model_config(model)
-    if config.timers is not None:
-        config.timers('forward-backward', log_level=1).start(barrier=config.barrier_with_L1_time)
+    # if config.timers is not None:
+    #     config.timers('forward-backward', log_level=1).start(barrier=config.barrier_with_L1_time)
 
     no_sync_func = config.no_sync_func
     if no_sync_func is None:
@@ -378,8 +379,8 @@ def forward_backward_no_pipelining(
     if not forward_only:
         backward_step(input_tensor, output_tensor, output_tensor_grad, model_type, config)
 
-    if config.timers is not None:
-        config.timers('forward-backward').stop()
+    # if config.timers is not None:
+    #     config.timers('forward-backward').stop()
 
     if config.finalize_model_grads_func is not None and not forward_only:
         # Finalize model grads (perform full grad all-reduce / reduce-scatter for
@@ -415,8 +416,8 @@ def forward_backward_pipelining_with_interleaving(
     if config.overlap_p2p_comm and config.batch_p2p_comm:
         raise ValueError("Can not use both overlap_p2p_comm and batch_p2p_comm")
 
-    if config.timers is not None:
-        config.timers('forward-backward', log_level=1).start(barrier=config.barrier_with_L1_time)
+    # if config.timers is not None:
+    #     config.timers('forward-backward', log_level=1).start(barrier=config.barrier_with_L1_time)
 
     # Disable async grad reductions
     no_sync_func = config.no_sync_func
@@ -952,8 +953,8 @@ def forward_backward_pipelining_with_interleaving(
                     config.grad_sync_func[model_chunk_id](model[model_chunk_id].parameters())
                     synchronized_model_chunks.add(model_chunk_id)
 
-    if config.timers is not None:
-        config.timers('forward-backward').stop()
+    # if config.timers is not None:
+    #     config.timers('forward-backward').stop()
 
     if config.finalize_model_grads_func is not None and not forward_only:
         # Finalize model grads (perform full grad all-reduce / reduce-scatter for
@@ -1103,8 +1104,8 @@ def forward_backward_pipelining_without_interleaving(
             "Non-interleaved pipeline parallelism does not support overlapping p2p communication"
         )
 
-    if config.timers is not None:
-        config.timers('forward-backward', log_level=1).start(barrier=config.barrier_with_L1_time)
+    # if config.timers is not None:
+    #     config.timers('forward-backward', log_level=1).start(barrier=config.barrier_with_L1_time)
 
     # Disable async grad reductions
     no_sync_func = config.no_sync_func
@@ -1306,8 +1307,8 @@ def forward_backward_pipelining_without_interleaving(
             if config.grad_sync_func is not None:
                 config.grad_sync_func(model.parameters())
 
-    if config.timers is not None:
-        config.timers('forward-backward').stop()
+    # if config.timers is not None:
+    #     config.timers('forward-backward').stop()
 
     if config.finalize_model_grads_func is not None and not forward_only:
         # Finalize model grads (perform full grad all-reduce / reduce-scatter for

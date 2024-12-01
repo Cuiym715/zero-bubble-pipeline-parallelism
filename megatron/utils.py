@@ -6,6 +6,10 @@ import sys
 
 import torch
 
+import os
+
+import json
+
 try:
     from apex.multi_tensor_apply import multi_tensor_applier
 except ImportError:
@@ -122,6 +126,27 @@ def report_memory(name):
         print("[Rank {}] {}".format(torch.distributed.get_rank(), string),
               flush=True)
 
+def clear_memory_recordfile(path):
+    file_path = os.path.join(path, "memory%d.jsonl"%torch.distributed.get_rank())
+    with open(file_path, "w") as f:
+        pass
+    
+
+def record_memory(path):
+    """Record GPU memory report to a file."""
+    giga_bytes = 1024.0 * 1024.0 * 1024.0
+    file_path = os.path.join(path, "memory%d.jsonl"%torch.distributed.get_rank())
+
+    memory_data = {
+        "allocated": torch.cuda.memory_allocated() / giga_bytes,
+        "max_allocated": torch.cuda.max_memory_allocated() / giga_bytes,
+        "reserved": torch.cuda.memory_reserved() / giga_bytes,
+        "max_reserved": torch.cuda.max_memory_reserved() / giga_bytes
+    }
+    
+    with open(file_path, "a") as f:
+        json.dump(memory_data, f)
+        f.write("\n")  # Write each entry on a new line for JSONL format
 
 def print_params_min_max_norm(optimizer, iteration):
     """Print min, max, and norm of all parameters."""

@@ -48,9 +48,11 @@ from megatron.data.data_samplers import build_pretraining_data_loader
 from megatron.utils import calc_params_l2_norm
 from megatron.core.pipeline_parallel import get_forward_backward_func
 from megatron.core.weight_grad_store import WeightGradStore
-from megatron.utils import report_memory
+from megatron.utils import report_memory, record_memory, clear_memory_recordfile
 from megatron.model.vision.knn_monitor import compute_feature_bank
-
+import os
+import json
+from torch.profiler import profile, record_function, ProfilerActivity
 
 def print_datetime(string):
     """Note that this call will sync across all ranks."""
@@ -115,6 +117,30 @@ def pretrain(train_valid_test_dataset_provider,
 
     args = get_args()
     timers = get_timers()
+    
+    # Initialize log
+    if args.timers_save is not None:
+        print_rank_0(f"Saving timers to {args.timers_save}")
+        directory = os.path.dirname(args.timers_save+'/log')
+        print_rank_0(f"Creating directory {directory}")
+        if directory != '':
+            os.makedirs(directory, exist_ok=True)
+        directory = os.path.dirname(args.timers_save)
+        print_rank_0(f"Creating directory {directory}")
+        # record parameters
+        params = {
+            'global-batch-size': args.global_batch_size,
+            'micro-batch-size': args.micro_batch_size,
+            'seq-length': args.seq_length,
+            'pp-size': args.pipeline_model_parallel_size,
+            'tp-size': args.tensor_model_parallel_size,
+            'world-size': args.world_size
+        }
+        with open(args.timers_save+'/params.json', 'w') as json_file:
+            json.dump(params, json_file, indent=4)
+        # clear record files
+        timers.clear_record_files(args.timers_save)
+        clear_memory_recordfile(args.timers_save)
 
     # Model, optimizer, and learning rate.
     timers('model-and-optimizer-setup', log_level=0).start(barrier=True)
@@ -173,6 +199,10 @@ def pretrain(train_valid_test_dataset_provider,
         print_rank_0('skipping training (--skip-train is on) ...')
 
         iteration = args.iteration
+        
+    if args.timers_save is not None:
+            record_memory(args.timers_save)
+            timers.record(args.timers_save)
 
     if args.do_valid:
         prefix = f'iteration {iteration} on validation set'
@@ -426,11 +456,14 @@ def train_step(forward_step_func, data_iterator,
     optimizer.zero_grad()
 
     # Forward pass.
-    timers('forward-backward', log_level=1).start(
-        barrier=args.barrier_with_L1_time)
+    # TODO: 不是很懂这步在干什么，schedule里也会开启forward-backward的timer，这块儿开了也不关
+    # timers('forward-backward', log_level=1).start(
+    #     barrier=args.barrier_with_L1_time)
     # set timers to None if none of the timers in fwd_bwd are active, just to save the checks
-    if args.timing_log_level < 2:
-        config.timers = None
+    # if args.timing_log_level < 2:
+    #     config.timers = None
+    if config.timers is not None:
+        config.timers('forward-backward', log_level=1).start(barrier=config.barrier_with_L1_time)
 
     def run_forward_backward_func():
         forward_backward_func = get_forward_backward_func()
@@ -445,6 +478,9 @@ def train_step(forward_step_func, data_iterator,
             forward_only=False)
 
     losses_reduced = run_forward_backward_func()
+    
+    if config.timers is not None:
+        config.timers('forward-backward').stop()
 
     # Empty unused memory.
     if args.empty_unused_memory_level >= 1:
@@ -467,8 +503,10 @@ def train_step(forward_step_func, data_iterator,
             zb_scheduler.optimizer = optimizer
             assert not zb_scheduler.is_first_run and zb_scheduler.do_post_validation
             update_successful, grad_norm, num_zeros_in_grad = run_forward_backward_func()
+            # print(f"log{torch.distributed.get_rank()}@_@: update_successful: {update_successful}, grad_norm: {grad_norm}, num_zeros_in_grad: {num_zeros_in_grad}")
             # Here num_zeros_in_grad is a fake name, representing for optimizer_rollback
         else:
+            # print_rank_0(f"log@_@: not post_validation_enabled, optimizer.post_validation_enabled: {optimizer.post_validation_enabled}, no_optimizer_post_validation: {no_optimizer_post_validation}")
             update_successful, grad_norm, num_zeros_in_grad = optimizer.step(args, timers)
             zb_scheduler.is_first_run = True
         optimizer.record_grad_norm(grad_norm)
@@ -787,114 +825,125 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
             'Manual garbage collection interval should be laerger than or equal to 0.'
         gc.disable()
         gc.collect()
-
-    while iteration < args.train_iters:
-        if args.profile and \
-           iteration == args.profile_step_start and \
-           torch.distributed.get_rank() in args.profile_ranks:
-            torch.cuda.cudart().cudaProfilerStart()
-            # torch.autograd.profiler.emit_nvtx(record_shapes=True).__enter__()
-
-        update_num_microbatches(args.consumed_train_samples)
-        args.curr_iteration = iteration
         
-        iteration += 1
-        do_eval = args.eval_interval and iteration % args.eval_interval == 0 and args.do_valid
-        no_optimizer_post_validation = do_eval or (args.exit_interval and iteration % args.exit_interval == 0)
-        loss_dict, skipped_iter, grad_norm, num_zeros_in_grad = \
-            train_step(forward_step_func,
-                       train_data_iterator,
-                       model,
-                       optimizer,
-                       opt_param_scheduler,
-                       config, no_optimizer_post_validation)
-        
-        args.consumed_train_samples += mpu.get_data_parallel_world_size() * \
-                                       args.micro_batch_size * \
-                                       get_num_microbatches()
+    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+        schedule=torch.profiler.schedule(wait=30, warmup=5, active=1),
+        on_trace_ready=torch.profiler.tensorboard_trace_handler(args.timers_save+'/profiler_logs'),
+        record_shapes=False,
+        profile_memory=False,
+        with_stack=True) as prof:
 
-        # Logging.
-        loss_scale = optimizer.get_loss_scale().item()
-        params_norm = None
-        if args.log_params_norm:
-            params_norm = calc_params_l2_norm(model)
-        report_memory_flag = training_log(loss_dict, total_loss_dict,
-                                          optimizer.param_groups[0]['lr'],
-                                          iteration, loss_scale,
-                                          report_memory_flag, skipped_iter,
-                                          grad_norm, params_norm, num_zeros_in_grad)
+        while iteration < args.train_iters:
+            print_rank_0('iteration: {}'.format(iteration))
+            if args.profile and \
+            iteration == args.profile_step_start and \
+            torch.distributed.get_rank() in args.profile_ranks:
+                torch.cuda.cudart().cudaProfilerStart()
+                # torch.autograd.profiler.emit_nvtx(record_shapes=True).__enter__()
 
-        # Autoresume
-        if args.adlr_autoresume and \
-           (iteration % args.adlr_autoresume_interval == 0):
-            check_adlr_autoresume_termination(iteration, model, optimizer,
-                                              opt_param_scheduler)
+            update_num_microbatches(args.consumed_train_samples)
+            args.curr_iteration = iteration
+            
+            iteration += 1
+            do_eval = args.eval_interval and iteration % args.eval_interval == 0 and args.do_valid
+            no_optimizer_post_validation = do_eval or (args.exit_interval and iteration % args.exit_interval == 0)
+            loss_dict, skipped_iter, grad_norm, num_zeros_in_grad = \
+                train_step(forward_step_func,
+                        train_data_iterator,
+                        model,
+                        optimizer,
+                        opt_param_scheduler,
+                        config, no_optimizer_post_validation)
+            
+            prof.step()
+            args.consumed_train_samples += mpu.get_data_parallel_world_size() * \
+                                        args.micro_batch_size * \
+                                        get_num_microbatches()
 
-        # Evaluation
-        if do_eval:
-            if args.manual_gc and args.manual_gc_eval:
-                # Collect all objects.
-                gc.collect()
-            prefix = 'iteration {}'.format(iteration)
-            evaluate_and_print_results(prefix, forward_step_func,
-                                       valid_data_iterator, model,
-                                       iteration, process_non_loss_data_func,
-                                       config, False)
-            if args.manual_gc and args.manual_gc_eval:
-                # Collect only the objects created and used in evaluation.
-                gc.collect(generation=0)
+            # Logging.
+            loss_scale = optimizer.get_loss_scale().item()
+            params_norm = None
+            if args.log_params_norm:
+                params_norm = calc_params_l2_norm(model)
+            report_memory_flag = training_log(loss_dict, total_loss_dict,
+                                            optimizer.param_groups[0]['lr'],
+                                            iteration, loss_scale,
+                                            report_memory_flag, skipped_iter,
+                                            grad_norm, params_norm, num_zeros_in_grad)
+            if args.timers_save is not None:
+                record_memory(args.timers_save)
 
-        # Checkpointing
-        saved_checkpoint = False
-        if args.exit_signal_handler:
-            signal_handler = get_signal_handler()
-            if any(signal_handler.signals_received()):
-                save_checkpoint_and_time(iteration, model, optimizer,
-                                         opt_param_scheduler)
-                print_datetime('exiting program after receiving SIGTERM.')
-                exit = True
-                break
+            # Autoresume
+            if args.adlr_autoresume and \
+            (iteration % args.adlr_autoresume_interval == 0):
+                check_adlr_autoresume_termination(iteration, model, optimizer,
+                                                opt_param_scheduler)
 
-        if args.save and args.save_interval and \
-           iteration % args.save_interval == 0:
-            save_checkpoint_and_time(iteration, model, optimizer,
-                                     opt_param_scheduler)
-            saved_checkpoint = True
+            # Evaluation
+            if do_eval:
+                if args.manual_gc and args.manual_gc_eval:
+                    # Collect all objects.
+                    gc.collect()
+                prefix = 'iteration {}'.format(iteration)
+                evaluate_and_print_results(prefix, forward_step_func,
+                                        valid_data_iterator, model,
+                                        iteration, process_non_loss_data_func,
+                                        config, False)
+                if args.manual_gc and args.manual_gc_eval:
+                    # Collect only the objects created and used in evaluation.
+                    gc.collect(generation=0)
 
-        # Exiting based on duration
-        if args.exit_duration_in_mins:
-            train_time = (time.time() - _TRAIN_START_TIME) / 60.0
-            done_cuda = torch.cuda.IntTensor(
-                [train_time > args.exit_duration_in_mins])
-            torch.distributed.all_reduce(
-                done_cuda, op=torch.distributed.ReduceOp.MAX)
-            done = done_cuda.item()
-            if done:
-                if not saved_checkpoint:
+            # Checkpointing
+            saved_checkpoint = False
+            if args.exit_signal_handler:
+                signal_handler = get_signal_handler()
+                if any(signal_handler.signals_received()):
                     save_checkpoint_and_time(iteration, model, optimizer,
-                                             opt_param_scheduler)
-                print_datetime('exiting program after {} minutes'.format(train_time))
+                                            opt_param_scheduler)
+                    print_datetime('exiting program after receiving SIGTERM.')
+                    exit = True
+                    break
+
+            if args.save and args.save_interval and \
+            iteration % args.save_interval == 0:
+                save_checkpoint_and_time(iteration, model, optimizer,
+                                        opt_param_scheduler)
+                saved_checkpoint = True
+
+            # Exiting based on duration
+            if args.exit_duration_in_mins:
+                train_time = (time.time() - _TRAIN_START_TIME) / 60.0
+                done_cuda = torch.cuda.IntTensor(
+                    [train_time > args.exit_duration_in_mins])
+                torch.distributed.all_reduce(
+                    done_cuda, op=torch.distributed.ReduceOp.MAX)
+                done = done_cuda.item()
+                if done:
+                    if not saved_checkpoint:
+                        save_checkpoint_and_time(iteration, model, optimizer,
+                                                opt_param_scheduler)
+                    print_datetime('exiting program after {} minutes'.format(train_time))
+                    exit = True
+                    break
+
+            # Exiting based on iterations
+            if args.exit_interval and iteration % args.exit_interval == 0:
+                if args.save and not saved_checkpoint:
+                    save_checkpoint_and_time(iteration, model, optimizer,
+                                            opt_param_scheduler)
+                torch.distributed.barrier()
+                print_datetime('exiting program at iteration {}'.format(iteration))
                 exit = True
                 break
 
-        # Exiting based on iterations
-        if args.exit_interval and iteration % args.exit_interval == 0:
-            if args.save and not saved_checkpoint:
-                save_checkpoint_and_time(iteration, model, optimizer,
-                                         opt_param_scheduler)
-            torch.distributed.barrier()
-            print_datetime('exiting program at iteration {}'.format(iteration))
-            exit = True
-            break
+            if args.profile and \
+            iteration == args.profile_step_end and \
+            torch.distributed.get_rank() in args.profile_ranks:
+                torch.cuda.cudart().cudaProfilerStop()
 
-        if args.profile and \
-           iteration == args.profile_step_end and \
-           torch.distributed.get_rank() in args.profile_ranks:
-            torch.cuda.cudart().cudaProfilerStop()
-
-        if args.manual_gc:
-            if args.manual_gc_interval != 0 and iteration % args.manual_gc_interval == 0:
-                gc.collect()
+            if args.manual_gc:
+                if args.manual_gc_interval != 0 and iteration % args.manual_gc_interval == 0:
+                    gc.collect()
 
     # Flush TensorBoard and WandB writers.
     writer = get_tensorboard_writer()
@@ -1128,17 +1177,20 @@ def build_train_valid_test_data_loaders(
         test_dataloader = build_pretraining_data_loader(test_ds, 0)
 
         # Flags to know if we need to do training/validation/testing.
+        print_rank_0(f"train_dataloader is not None: {train_dataloader is not None}, args.train_iters: {args.train_iters}")
         do_train = train_dataloader is not None and args.train_iters > 0
         do_valid = valid_dataloader is not None and args.eval_iters > 0
         do_test = test_dataloader is not None and args.eval_iters > 0
         flags = torch.cuda.LongTensor(
             [int(do_train), int(do_valid), int(do_test)])
     else:
+        print_rank_0(f"is distributed: {is_distributed}, mpu.get_tensor_model_parallel_rank(): {mpu.get_tensor_model_parallel_rank()}")
         flags = torch.cuda.LongTensor([0, 0, 0])
 
     torch.distributed.broadcast(flags, 0)
 
     args.do_train = getattr(args, "do_train", False) or flags[0].item()
+    print_rank_0(f"args.do_train: {args.do_train}, flags[0].item(): {flags[0].item()}")
     args.do_valid = getattr(args, "do_valid", False) or flags[1].item()
     args.do_test = getattr(args, "do_test", False) or flags[2].item()
 

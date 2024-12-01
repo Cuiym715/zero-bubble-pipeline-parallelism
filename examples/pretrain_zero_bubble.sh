@@ -9,12 +9,13 @@ DIR=`pwd`
 DATETIME=`date +'date_%y-%m-%d_time_%H-%M-%S'`
 mkdir -p $DIR/logs
 
-DATASET="/tmp/zb_sample_dataset/dataset/c4_text_document"
+DATA_PATH="/workspace/data/zb_sample_dataset/dataset/c4_text_document"
+# DATASET="/tmp/zb_sample_dataset/dataset/c4_text_document"
 
-if [ ! -e "$DATASET"".idx" ]; then
-  wget https://huggingface.co/datasets/ufotalent/zero_bubble_sample_dataset/resolve/main/zb_sample_dataset.tar.gz
-  tar -xvf zb_sample_dataset.tar.gz -C /tmp
-fi
+# if [ ! -e "$DATASET"".idx" ]; then
+#   wget https://huggingface.co/datasets/ufotalent/zero_bubble_sample_dataset/resolve/main/zb_sample_dataset.tar.gz
+#   tar -xvf zb_sample_dataset.tar.gz -C /tmp
+# fi
 
 # Running locally
 if [ -z "$WORLD_SIZE" ]; then
@@ -83,7 +84,7 @@ options=" \
   --eval-interval $EVAL_INTERVAL \
   --data-path ${DATASET} \
   --tokenizer-type GPTSentencePieceTokenizer \
-  --tokenizer-model /tmp/zb_sample_dataset/tokenizers/tokenizer.model \
+  --tokenizer-model /workspace/data/zb_sample_dataset/tokenizers/tokenizer.model \
   --split 98,2,0 \
   --clip-grad 8.0 \
   --weight-decay 0.1 \
@@ -91,18 +92,21 @@ options=" \
   --adam-beta2 0.95 \
   --init-method-std 0.006 \
   --no-barrier-with-level-1-timing \
-  --profile-step-start 150 \
-  --profile-step-end 170 \
+  --timers-save /workspace/workspace/model/gpt2/test
+
   --profile-ranks $profile_ranks \
   --allow-padding-num-layers"
+#  --profile-step-start 150 \
+  # --profile-step-end 170 \
 
 if [ -z "$FP32" ]; then
   options="$options --fp16"
 fi
 
-if [ ! -z "$PROFILED" ]; then
-  options="$options --profile"
-fi
+# 不profile的还调不明白呢
+# if [ ! -z "$PROFILED" ]; then
+#   options="$options --profile"
+# fi
 
 if [ ! -z "$ZERO_BUBBLE_V_SCHEDULE" ]; then
   ENABLE_ZERO_BUBBLE=1
@@ -133,7 +137,8 @@ run_cmd="torchrun --nnodes $WORLD_SIZE \
   --node_rank $RANK \
   --master_addr $MASTER_ADDR \
   --master_port $MASTER_PORT \
-  --nproc_per_node=$GPUS_PER_NODE ${DIR}/pretrain_gpt.py $@ ${options}"
+  --nproc_per_node=$GPUS_PER_NODE ${DIR}/pretrain_gpt.py $@ ${options}\
+    2>&1 | tee logs/gpt_$DATETIME.txt"
 
 if [ ! -z "$PROFILED" ]; then
   run_cmd="nsys profile -s none -t nvtx,cuda \

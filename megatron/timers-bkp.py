@@ -7,7 +7,7 @@ from abc import abstractmethod
 import time
 
 import torch
-import json
+
 
 
 class TimerBase(ABC):
@@ -67,9 +67,6 @@ class Timer(TimerBase):
         super().__init__(name)
         self._elapsed = 0.0
         self._started = False
-        # self._historical_time = []
-        self._start_time_queue = []
-        self._end_time_queue = []
         # Note that None will default to the global process group
         self._barrier_group = None
         self._start_time = time.time()
@@ -79,7 +76,7 @@ class Timer(TimerBase):
         self._barrier_group = barrier_group
 
 
-    def start(self, barrier=False, record = True):
+    def start(self, barrier=False):
         """Start the timer."""
         assert not self._started, 'timer has already been started'
         if barrier:
@@ -87,30 +84,16 @@ class Timer(TimerBase):
         torch.cuda.synchronize()
         self._start_time = time.time()
         self._started = True
-        if record:
-            self._start_time_queue.append(self._start_time)
-        # if self.name == 'forward-compute':
-        #     print(torch.distributed.get_rank(), 'forward compute start time:', self._start_time)
-        # if self.name == 'backward-compute':
-        #     print(torch.distributed.get_rank(), 'backward compute start time:', self._start_time)
 
 
-    def stop(self, barrier=False, record=True):
+    def stop(self, barrier=False):
         """Stop the timer."""
         assert self._started, 'timer is not started'
         if barrier:
             torch.distributed.barrier(group=self._barrier_group)
         torch.cuda.synchronize()
-        end_time = time.time()
-        self._elapsed += (end_time - self._start_time)
+        self._elapsed += (time.time() - self._start_time)
         self._started = False
-        if record:
-            self._end_time_queue.append(end_time)
-            # self._historical_time.append(time.time() - self._start_time)
-        # if self.name == 'forward-compute':
-        #     print(torch.distributed.get_rank(), 'forward compute end time:', end_time)
-        # if self.name == 'backward-compute':
-        #     print(torch.distributed.get_rank(), 'backward compute end time:', end_time)
 
 
     def reset(self):
@@ -124,7 +107,7 @@ class Timer(TimerBase):
         _started = self._started
         # If the timing in progress, end it first.
         if self._started:
-            self.stop(barrier=barrier, record=False)
+            self.stop(barrier=barrier)
         # Get the elapsed time.
         _elapsed = self._elapsed
         # Reset the elapsed time
@@ -134,34 +117,6 @@ class Timer(TimerBase):
         if _started:
             self.start(barrier=barrier)
         return _elapsed
-    
-    def record(self, record_path):
-        # if len(self._historical_time) == 0:
-        #     return
-        if len(self._start_time_queue) == 0:
-            return
-        try:
-            with open(record_path, 'r') as file:
-                data = json.load(file)
-        except FileNotFoundError:
-            data = {}
-        # Update data with current timer information
-        if self.name in data.keys():
-            # data[self.name].extend(self._historical_time)
-            data[self.name]['start'].extend(self._start_time_queue)
-            data[self.name]['end'].extend(self._end_time_queue)
-        else:
-            # data[self.name] = self._historical_time
-            data[self.name] = {}
-            data[self.name]['start'] = self._start_time_queue
-            data[self.name]['end'] = self._end_time_queue
-        # Write updated data back to file
-        with open(record_path, 'w') as file:
-            json.dump(data, file, indent=4)
-        # Clear historical elapsed times
-        # self._historical_time = []
-        self._start_time_queue = []
-        self._end_time_queue = []
 
 
 
@@ -347,19 +302,3 @@ class Timers:
             for name in name_to_min_max_time:
                 _, max_time = name_to_min_max_time[name]
                 writer.add_scalar(name + '-time', max_time, iteration)
-                
-    def clear_record_files(self, record_path):
-        with open(record_path+'/timerlog%d.json'%torch.distributed.get_rank(), 'w') as file:
-            json.dump({}, file, indent=4)
-    
-    def record(self, record_path):
-        """Record elapsed times for all timers into a specified path."""
-        for name in self._timers.keys():
-            # Check if the timer is a dummy timer to avoid calling record on it
-            timer = self._timers[name]
-            if not isinstance(timer, DummyTimer):
-                timer.record(record_path+'/timerlog%d.json'%torch.distributed.get_rank())
-                
-    def record_log_level(self, record_path):
-        with open(record_path+'/timerloglevel.json', 'w') as file:
-            json.dump(self._log_levels, file, indent=4)
