@@ -171,6 +171,19 @@ def validate_args(args, defaults={}):
             print('setting global batch size to {}'.format(
                 args.global_batch_size), flush=True)
     assert args.global_batch_size > 0
+    # TODO: 只有i-1F1B才用overlap_p2p_comm
+    if args.num_layers_per_virtual_pipeline_stage is None:
+        # Overlap P2P communication is disabled if not using the interleaved schedule.
+        args.overlap_p2p_comm = False
+        if args.rank == 0:
+            print('WARNING: Setting args.overlap_p2p_comm to False since non-interleaved '
+                  'schedule does not support overlapping p2p communication')
+    if args.num_waves_per_pipeline is not None:
+        assert args.num_layers_per_virtual_pipeline_stage is None, \
+            'must choose one between virtual pipeline & WavePipe'
+        # TODO 判断num_micro_batch==global_size
+        args.num_layers_per_virtual_pipeline_stage = args.num_layers // \
+            (args.pipeline_model_parallel_size * args.num_waves_per_pipeline * 2)
     if args.num_layers_per_virtual_pipeline_stage is not None:
         assert args.pipeline_model_parallel_size > 2, \
             'pipeline-model-parallel size should be greater than 2 with ' \
@@ -184,11 +197,7 @@ def validate_args(args, defaults={}):
             args.num_layers_per_virtual_pipeline_stage
     else:
         args.virtual_pipeline_model_parallel_size = None
-        # Overlap P2P communication is disabled if not using the interleaved schedule.
-        args.overlap_p2p_comm = False
-        if args.rank == 0:
-            print('WARNING: Setting args.overlap_p2p_comm to False since non-interleaved '
-                  'schedule does not support overlapping p2p communication')
+        
 
     # TODO: validate more
     if args.zero_bubble_v_schedule:
@@ -222,6 +231,16 @@ def validate_args(args, defaults={}):
     if args.overlap_param_gather:
         assert args.use_distributed_optimizer, \
             '--overlap-param-gather only supported with distributed optimizer'
+            
+    if args.enable_chimera:
+        assert (
+            args.num_layers % args.transformer_pipeline_model_parallel_size == 0
+        ), "number of layers should be divisible by the pipeline parallel size"
+        num_layers_per_pipeline_stage = (
+            args.num_layers // args.transformer_pipeline_model_parallel_size
+        )
+        args.virtual_pipeline_model_parallel_size = 2
+        args.num_layers_per_virtual_pipeline_stage = num_layers_per_pipeline_stage
 
     # Parameters dtype.
     args.params_dtype = torch.float
@@ -1173,9 +1192,17 @@ def _add_distributed_args(parser):
                        '--tensor-model-parallel-size instead.')
     group.add_argument('--num-layers-per-virtual-pipeline-stage', type=int, default=None,
                        help='Number of layers per virtual pipeline stage')
+    group.add_argument('--num-waves-per-pipeline', type=int, default=None,
+                       help='Number of waves per pipeline')
     group.add_argument('--use-gpipe', action='store_true',
                        help='use gpipe parallelism',
                        dest='use_gpipe')
+    group.add_argument('--enable-chimera', action='store_true',
+                       help='Enable chimera parallelism',
+                       dest='enable_chimera')
+    group.add_argument('--enable-dynamic-pp', action='store_true',
+                       help='Enable dynamic pipeline parallelism',
+                       dest='enable_dynamic_pp')
     group.add_argument('--no-overlap-p2p-communication', action='store_false',
                        help='overlap pipeline parallel communication with forward and backward chunks',
                        dest='overlap_p2p_comm')

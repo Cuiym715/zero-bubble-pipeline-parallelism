@@ -338,6 +338,8 @@ def print_second_last_pipeline_stage(message):
 def is_pipeline_stage_containing_loss():
     if get_args().zero_bubble_v_schedule:
         return mpu.is_pipeline_first_stage(ignore_virtual=True)
+    if get_args().num_waves_per_pipeline is not None:
+        return mpu.is_pipeline_first_stage(ignore_virtual=True)
     else:
         return mpu.is_pipeline_last_stage(ignore_virtual=True)
 

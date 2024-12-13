@@ -31,10 +31,13 @@ _TENSOR_AND_DATA_PARALLEL_GROUP = None
 # Expert parallel group that the current rank belongs to.
 _TENSOR_AND_EXPERT_PARALLEL_GROUP = None
 _DATA_MODULO_EXPERT_PARALLEL_GROUP = None
-
+# chimera group
+_CHIMERA_GROUP = None
+_CHIMERA_GLOBAL_RANKS = None
 
 _VIRTUAL_PIPELINE_MODEL_PARALLEL_RANK = None
 _VIRTUAL_PIPELINE_MODEL_PARALLEL_WORLD_SIZE = None
+_WAVEPIPE_MODEL_PARALLEL_WORLD_SIZE = None
 _PIPELINE_MODEL_PARALLEL_SPLIT_RANK = None
 
 # These values enable us to change the mpu sizes on the fly.
@@ -98,6 +101,7 @@ def initialize_model_parallel(
     tensor_model_parallel_size: int = 1,
     pipeline_model_parallel_size: int = 1,
     virtual_pipeline_model_parallel_size: Optional[int] = None,
+    wavepipe_model_parallel_size: Optional[int] = None,
     pipeline_model_parallel_split_rank: Optional[int] = None,
     use_sharp: bool = False,
     context_parallel_size: int = 1,
@@ -225,6 +229,10 @@ def initialize_model_parallel(
 
     num_tensor_model_parallel_groups: int = world_size // tensor_model_parallel_size
     num_pipeline_model_parallel_groups: int = world_size // pipeline_model_parallel_size
+
+    if wavepipe_model_parallel_size is not None:
+        global _WAVEPIPE_MODEL_PARALLEL_WORLD_SIZE
+        _WAVEPIPE_MODEL_PARALLEL_WORLD_SIZE = wavepipe_model_parallel_size
 
     if virtual_pipeline_model_parallel_size is not None:
         if not pipeline_model_parallel_size > 2:
@@ -375,14 +383,28 @@ def initialize_model_parallel(
     global _POSITION_EMBEDDING_GROUP
     global _POSITION_EMBEDDING_GLOBAL_RANKS
     assert _POSITION_EMBEDDING_GROUP is None, 'position embedding group is already initialized'
+    global _CHIMERA_GROUP
+    global _CHIMERA_GLOBAL_RANKS
+    assert _CHIMERA_GROUP is None, 'chimera group is already initialized'
     for i in range(num_pipeline_model_parallel_groups):
         ranks = range(i, world_size, num_pipeline_model_parallel_groups)
+        print(f"pp ranks: {ranks}")
         group = torch.distributed.new_group(
             ranks, pg_options=get_nccl_options('pp', nccl_comm_cfgs)
         )
         if rank in ranks:
             _PIPELINE_MODEL_PARALLEL_GROUP = group
             _PIPELINE_GLOBAL_RANKS = ranks
+        # setup chimera group
+        if get_args().enable_chimera:
+            assert pipeline_model_parallel_size % 2 == 0, "Chimera requires even number of PP ranks"
+            num_chimera_groups = pipeline_model_parallel_size // 2
+            for j in range(num_chimera_groups):
+                chimera_ranks = [ranks[0+j], ranks[-1-j]]
+                group = torch.distributed.new_group(chimera_ranks) # 非rank所在的组会返回-100
+                if rank in chimera_ranks:
+                    _CHIMERA_GROUP = group
+                    _CHIMERA_GLOBAL_RANKS = chimera_ranks
         # Setup embedding group (to exchange gradients between
         # first and last stages).
         if len(ranks) > 1:
@@ -390,16 +412,28 @@ def initialize_model_parallel(
             position_embedding_ranks = [ranks[0]]
             if get_args().zero_bubble_v_schedule:
                 embedding_ranks = [ranks[0]]
-            if pipeline_model_parallel_split_rank is not None:
-                assert not get_args().zero_bubble_v_schedule
-                if ranks[pipeline_model_parallel_split_rank] not in embedding_ranks:
-                    embedding_ranks = [
-                        ranks[0],
-                        ranks[pipeline_model_parallel_split_rank],
-                        ranks[-1],
-                    ]
-                if ranks[pipeline_model_parallel_split_rank] not in position_embedding_ranks:
-                    position_embedding_ranks = [ranks[0], ranks[pipeline_model_parallel_split_rank]]
+            if wavepipe_model_parallel_size is not None:
+                embedding_ranks = [ranks[0]]
+                if pipeline_model_parallel_split_rank is not None:
+                    if ranks[pipeline_model_parallel_split_rank] not in embedding_ranks:
+                        embedding_ranks = [ranks[0],
+                                        ranks[pipeline_model_parallel_split_rank]]
+                    if ranks[pipeline_model_parallel_split_rank] not in position_embedding_ranks:
+                        position_embedding_ranks = [ranks[0],
+                                        ranks[pipeline_model_parallel_split_rank]]
+            else:
+                if pipeline_model_parallel_split_rank is not None:
+                    assert not get_args().zero_bubble_v_schedule
+                    if ranks[pipeline_model_parallel_split_rank] not in embedding_ranks:
+                        embedding_ranks = [
+                            ranks[0],
+                            ranks[pipeline_model_parallel_split_rank],
+                            ranks[-1],
+                        ]
+                    if ranks[pipeline_model_parallel_split_rank] not in position_embedding_ranks:
+                        position_embedding_ranks = [ranks[0], ranks[pipeline_model_parallel_split_rank]]
+            if get_args().enable_chimera:
+                position_embedding_ranks = [ranks[0], ranks[-1]]
         else:
             embedding_ranks = ranks
             position_embedding_ranks = ranks
@@ -601,6 +635,10 @@ def get_position_embedding_group():
     assert _POSITION_EMBEDDING_GROUP is not None, 'position embedding group is not initialized'
     return _POSITION_EMBEDDING_GROUP
 
+def get_chimera_group():
+    """Get the chimera group the caller rank belongs to."""
+    assert _CHIMERA_GROUP is not None, 'chimera group is not initialized'
+    return _CHIMERA_GROUP
 
 def get_amax_reduction_group(with_context_parallel=False):
     """Get the FP8 amax reduction group the caller rank belongs to."""
@@ -661,6 +699,10 @@ def set_virtual_pipeline_model_parallel_world_size(world_size):
     global _VIRTUAL_PIPELINE_MODEL_PARALLEL_WORLD_SIZE
     _VIRTUAL_PIPELINE_MODEL_PARALLEL_WORLD_SIZE = world_size
 
+def set_wavepipe_model_parallel_world_size(world_size):
+    """Set the pipeline model parallel size"""
+    global _WAVEPIPE_MODEL_PARALLEL_WORLD_SIZE
+    _WAVEPIPE_MODEL_PARALLEL_WORLD_SIZE= world_size
 
 def get_tensor_model_parallel_world_size():
     """Return world size for the tensor model parallel group."""
@@ -709,6 +751,7 @@ def get_pipeline_model_parallel_rank():
     global _MPU_PIPELINE_MODEL_PARALLEL_RANK
     if _MPU_PIPELINE_MODEL_PARALLEL_RANK is not None:
         return _MPU_PIPELINE_MODEL_PARALLEL_RANK
+    # TODO: BitPipe里有个改变顺序
     return torch.distributed.get_rank(group=get_pipeline_model_parallel_group())
 
 
@@ -721,6 +764,15 @@ def get_pipeline_model_parallel_split_rank():
 def is_pipeline_first_stage(ignore_virtual=False):
     """Return True if in the first pipeline model-parallel stage, False otherwise."""
     if not ignore_virtual:
+        if get_args().enable_chimera:
+            return (
+                get_pipeline_model_parallel_rank()
+                == (get_pipeline_model_parallel_world_size() - 1)
+                and get_virtual_pipeline_model_parallel_rank()== 1
+            ) or (
+                get_pipeline_model_parallel_rank() == 0
+                and get_virtual_pipeline_model_parallel_rank()== 0
+            )
         if (
             get_virtual_pipeline_model_parallel_world_size() is not None
             and get_virtual_pipeline_model_parallel_rank() != 0
@@ -731,10 +783,25 @@ def is_pipeline_first_stage(ignore_virtual=False):
 
 def is_pipeline_last_stage(ignore_virtual=False):
     """Return True if in the last pipeline model-parallel stage, False otherwise."""
+    is_wavepipe = (get_wavepipe_model_parallel_world_size() is not None)
     if not ignore_virtual:
+        if get_args().enable_chimera:
+            return (
+                get_pipeline_model_parallel_rank() == 0
+                and get_virtual_pipeline_model_parallel_rank() == 1
+            ) or (
+                get_pipeline_model_parallel_rank()
+                == (get_pipeline_model_parallel_world_size() - 1)
+                and get_virtual_pipeline_model_parallel_rank() == 0
+            )
         virtual_pipeline_model_parallel_world_size = (
             get_virtual_pipeline_model_parallel_world_size()
         )
+        if is_wavepipe:
+            if get_virtual_pipeline_model_parallel_rank() != (
+                virtual_pipeline_model_parallel_world_size - 1):
+                return False
+            return get_pipeline_model_parallel_rank() == 0
         if get_args().zero_bubble_v_schedule:
             assert virtual_pipeline_model_parallel_world_size == 2
             return get_pipeline_model_parallel_rank() == 0 and get_virtual_pipeline_model_parallel_rank() == virtual_pipeline_model_parallel_world_size - 1
@@ -742,6 +809,8 @@ def is_pipeline_last_stage(ignore_virtual=False):
             virtual_pipeline_model_parallel_world_size - 1
         ):
             return False
+    # if is_wavepipe:
+    #     return get_pipeline_model_parallel_rank() == 0
     return get_pipeline_model_parallel_rank() == (get_pipeline_model_parallel_world_size() - 1)
 
 
@@ -751,7 +820,7 @@ def is_rank_in_embedding_group(ignore_virtual=False):
     global _EMBEDDING_GLOBAL_RANKS
     if ignore_virtual:
         return rank in _EMBEDDING_GLOBAL_RANKS
-    if get_args().zero_bubble_v_schedule:
+    if get_args().zero_bubble_v_schedule or get_args().enable_chimera:
         return is_pipeline_first_stage(ignore_virtual=False) or is_pipeline_last_stage(ignore_virtual=False)
     if rank in _EMBEDDING_GLOBAL_RANKS:
         if rank == _EMBEDDING_GLOBAL_RANKS[0]:
@@ -768,6 +837,13 @@ def is_rank_in_position_embedding_group():
     rank = torch.distributed.get_rank()
     global _POSITION_EMBEDDING_GLOBAL_RANKS
     return rank in _POSITION_EMBEDDING_GLOBAL_RANKS
+
+
+def is_rank_in_chimera_group():
+    """Return true if current rank is in chimera group, False otherwise."""
+    rank = torch.distributed.get_rank()
+    global _CHIMERA_GLOBAL_RANKS
+    return rank in _CHIMERA_GLOBAL_RANKS
 
 
 def is_pipeline_stage_before_split(rank=None):
@@ -825,6 +901,10 @@ def get_virtual_pipeline_model_parallel_world_size():
     global _VIRTUAL_PIPELINE_MODEL_PARALLEL_WORLD_SIZE
     return _VIRTUAL_PIPELINE_MODEL_PARALLEL_WORLD_SIZE
 
+def get_wavepipe_model_parallel_world_size():
+    """Return the wavepipe model-parallel world size"""
+    global _WAVEPIPE_MODEL_PARALLEL_WORLD_SIZE
+    return _WAVEPIPE_MODEL_PARALLEL_WORLD_SIZE
 
 def get_tensor_model_parallel_src_rank():
     """Calculate the global rank corresponding to the first local rank
@@ -845,12 +925,20 @@ def get_data_parallel_src_rank(with_context_parallel=False):
     else:
         assert _DATA_PARALLEL_GLOBAL_RANKS is not None, "Data parallel group is not initialized"
         return _DATA_PARALLEL_GLOBAL_RANKS[0]
-
+    
+def get_chimera_src_rank():
+    """Calculate the global rank corresponding to the first local rank
+    in the chimera group."""
+    assert _CHIMERA_GLOBAL_RANKS is not None, "Chimera group is not initialized"
+    return _CHIMERA_GLOBAL_RANKS[0]
 
 def get_pipeline_model_parallel_first_rank():
     """Return the global rank of the first process in the pipeline for the
     current tensor parallel group"""
     assert _PIPELINE_GLOBAL_RANKS is not None, "Pipeline parallel group is not initialized"
+    last_rank_local = get_pipeline_model_parallel_world_size() - 1
+    if get_args().enable_chimera and (get_virtual_pipeline_model_parallel_rank() == 1):
+        return _PIPELINE_GLOBAL_RANKS[last_rank_local]
     return _PIPELINE_GLOBAL_RANKS[0]
 
 
@@ -858,6 +946,10 @@ def get_pipeline_model_parallel_last_rank():
     """Return the global rank of the last process in the pipeline for the
     current tensor parallel group"""
     assert _PIPELINE_GLOBAL_RANKS is not None, "Pipeline parallel group is not initialized"
+    if get_args().enable_chimera and (get_virtual_pipeline_model_parallel_rank() == 0):
+        return _PIPELINE_GLOBAL_RANKS[0]
+    if get_args().num_waves_per_pipeline is not None:
+        return _PIPELINE_GLOBAL_RANKS[0]
     last_rank_local = get_pipeline_model_parallel_world_size() - 1
     return _PIPELINE_GLOBAL_RANKS[last_rank_local]
 
@@ -867,6 +959,18 @@ def get_pipeline_model_parallel_next_rank():
     assert _PIPELINE_GLOBAL_RANKS is not None, "Pipeline parallel group is not initialized"
     rank_in_pipeline = get_pipeline_model_parallel_rank()
     world_size = get_pipeline_model_parallel_world_size()
+    if get_args().enable_chimera:
+        if get_virtual_pipeline_model_parallel_rank() == 1:
+            return _PIPELINE_GLOBAL_RANKS[(rank_in_pipeline - 1) % world_size]
+    if get_args().num_waves_per_pipeline is not None:
+        if get_virtual_pipeline_model_parallel_rank() % 2 == 1:
+            if rank_in_pipeline == 0:
+                return _PIPELINE_GLOBAL_RANKS[0]
+            return _PIPELINE_GLOBAL_RANKS[(rank_in_pipeline - 1) % world_size]
+        else:
+            if rank_in_pipeline == world_size - 1:
+                return _PIPELINE_GLOBAL_RANKS[world_size - 1]
+            return _PIPELINE_GLOBAL_RANKS[(rank_in_pipeline + 1) % world_size]
     return _PIPELINE_GLOBAL_RANKS[(rank_in_pipeline + 1) % world_size]
 
 
@@ -875,6 +979,18 @@ def get_pipeline_model_parallel_prev_rank():
     assert _PIPELINE_GLOBAL_RANKS is not None, "Pipeline parallel group is not initialized"
     rank_in_pipeline = get_pipeline_model_parallel_rank()
     world_size = get_pipeline_model_parallel_world_size()
+    if get_args().enable_chimera:
+        if get_virtual_pipeline_model_parallel_rank() == 1:
+            return _PIPELINE_GLOBAL_RANKS[(rank_in_pipeline + 1) % world_size]
+    if get_args().num_waves_per_pipeline is not None:
+        if get_virtual_pipeline_model_parallel_rank() % 2 == 1:
+            if rank_in_pipeline == world_size - 1:
+                return _PIPELINE_GLOBAL_RANKS[world_size - 1]
+            return _PIPELINE_GLOBAL_RANKS[(rank_in_pipeline + 1) % world_size]
+        else:
+            if rank_in_pipeline == 0:
+                return _PIPELINE_GLOBAL_RANKS[0]
+            return _PIPELINE_GLOBAL_RANKS[(rank_in_pipeline - 1) % world_size]
     return _PIPELINE_GLOBAL_RANKS[(rank_in_pipeline - 1) % world_size]
 
 
@@ -995,6 +1111,8 @@ def destroy_model_parallel():
     _VIRTUAL_PIPELINE_MODEL_PARALLEL_RANK = None
     global _VIRTUAL_PIPELINE_MODEL_PARALLEL_WORLD_SIZE
     _VIRTUAL_PIPELINE_MODEL_PARALLEL_WORLD_SIZE = None
+    global _WAVEPIPE_MODEL_PARALLEL_WORLD_SIZE
+    _WAVEPIPE_MODEL_PARALLEL_WORLD_SIZE = None
     global _MPU_TENSOR_MODEL_PARALLEL_WORLD_SIZE
     _MPU_TENSOR_MODEL_PARALLEL_WORLD_SIZE = None
     global _MPU_PIPELINE_MODEL_PARALLEL_WORLD_SIZE

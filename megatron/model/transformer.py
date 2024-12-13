@@ -1519,7 +1519,36 @@ class ParallelTransformer(MegatronModule):
                     fuse_qkv_params=True,
                     **extra_transformer_engine_kwargs)
 
-        if config.virtual_pipeline_model_parallel_size is not None:
+        if args.num_waves_per_pipeline is not None:
+            assert args.num_layers % args.virtual_pipeline_model_parallel_size == 0, \
+                'num_layers_per_stage must be divisible by ' \
+                'virtual_pipeline_model_parallel_size'
+            assert args.model_type != ModelType.encoder_and_decoder
+            # Number of layers in each model chunk is the number of layers in the stage,
+            # divided by the number of model chunks in a stage.
+            self.num_layers = self.num_layers // args.virtual_pipeline_model_parallel_size
+            # With 8 layers, 2 stages, and 4 model chunks, we want an assignment of
+            # layers to stages like (each list is a model chunk):
+            # Stage 0: [0]  [3]  [4]  [7]
+            # Stage 1: [1]  [2]  [5]  [6]
+            # With 8 layers, 2 stages, and 2 virtual stages, we want an assignment of
+            # layers to stages like (each list is a model chunk):
+            # Stage 0: [0, 1]  [6, 7]
+            # Stage 1: [2, 3]  [4, 5]
+            if mpu.get_virtual_pipeline_model_parallel_rank() % 2 == 0:
+                offset = mpu.get_virtual_pipeline_model_parallel_rank() * (
+                    args.num_layers // args.virtual_pipeline_model_parallel_size) + \
+                    (mpu.get_pipeline_model_parallel_rank() * self.num_layers)
+            else:
+                offset = args.num_layers // (self.num_layers * args.virtual_pipeline_model_parallel_size) - \
+                    mpu.get_pipeline_model_parallel_rank() - 1
+                offset = mpu.get_virtual_pipeline_model_parallel_rank() * (
+                    args.num_layers // args.virtual_pipeline_model_parallel_size) + \
+                    (offset * self.num_layers)
+            offset1 = mpu.get_virtual_pipeline_model_parallel_rank() * (
+                args.num_layers // args.virtual_pipeline_model_parallel_size) + \
+                (mpu.get_pipeline_model_parallel_rank() * self.num_layers)
+        elif config.virtual_pipeline_model_parallel_size is not None:
             assert config.num_layers % config.virtual_pipeline_model_parallel_size == 0, \
                 'num_layers_per_stage must be divisible by ' \
                 'virtual_pipeline_model_parallel_size'

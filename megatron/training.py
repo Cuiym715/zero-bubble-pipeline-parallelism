@@ -146,6 +146,7 @@ def pretrain(train_valid_test_dataset_provider,
     timers('model-and-optimizer-setup', log_level=0).start(barrier=True)
     model, optimizer, opt_param_scheduler = setup_model_and_optimizer(
         model_provider, model_type)
+    print(f"log@_@: device: {torch.cuda.current_device()}, model: {model}")
     timers('model-and-optimizer-setup').stop()
     print_datetime('after model, optimizer, and learning rate '
                    'scheduler are built')
@@ -316,6 +317,8 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
     for model_module in model:
         for param in model_module.parameters():
             tensor_parallel.set_defaults_if_not_set_tensor_model_parallel_attributes(param)
+            
+    print(f"log@_@0: device: {torch.cuda.current_device()}, model: {model}, wrap_with_ddp: {wrap_with_ddp}")
 
     # Print number of parameters.
     if mpu.get_data_parallel_rank() == 0:
@@ -351,6 +354,24 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
         if args.data_parallel_random_init:
             for model_module in model:
                 model_module.broadcast_params()
+
+    if args.enable_chimera:
+        for param in model[0].module.parameters():
+            torch.distributed.broadcast(
+                param.data,
+                src=mpu.get_chimera_src_rank(),
+                group=mpu.get_chimera_group()
+            )
+        for param in model[1].module.parameters():
+            torch.distributed.broadcast(
+                param.data,
+                src=mpu.get_chimera_src_rank(),
+                group=mpu.get_chimera_group()
+            )
+            
+    model_path = f"{args.timers_save}/modellog{torch.distributed.get_rank()}.txt" 
+    with open(model_path, 'w') as f:
+        f.write(str(model))
 
     return model
 
