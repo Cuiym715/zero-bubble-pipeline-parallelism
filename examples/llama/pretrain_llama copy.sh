@@ -37,13 +37,8 @@ if [ $PP_SCHEDULE == "gpipe" ]; then
     echo "gpipe"
     sleep 3
     PP_ARGS="--use-gpipe"
-elif [ $PP_SCHEDULE == "1F1B" ]; then
-    echo "1F1B"
-    sleep 3
-elif [ $PP_SCHEDULE == "i-1F1B" ]; then
-    echo "i-1F1B"
-    sleep 3
-    PP_ARGS="--num-layers-per-virtual-pipeline-stage 2"
+elif [ $PP_SCHEDULE == "pipeline" ]; then
+    PP_ARGS="--pipeline-schedule"
 elif [ $PP_SCHEDULE == "hanayo" ]; then
     PP_ARGS="--num-waves-per-pipeline $WAVE_SIZE"
 elif [ $PP_SCHEDULE == "v-zb" ]; then
@@ -87,90 +82,19 @@ GPT_ARGS="
     --num-layers $NUM_LAYERS \
     --hidden-size $HIDDEN_SIZE \
     --num-attention-heads $NUM_ATTENTION_HEADS \
-    --ffn-hidden-size $FFN_HIDDEN_SIZE \
-    --seq-length $SEQ_LENGTH \
-    --max-position-embeddings $SEQ_LENGTH \
-    ${GQA_ARGS:-} \
-    --micro-batch-size $MICRO_BATCH_SIZE \
-    --global-batch-size $GLOBAL_BATCH_SIZE \
-    --lr 1.5e-4 \
-    --train-iters $TRAIN_ITERS \
-    --exit-interval 1000 \
-    --lr-decay-iters 500000 \
-    --lr-decay-style cosine \
-    --min-lr 1.5e-5 \
-    --weight-decay 0.1 \
-    --lr-warmup-iters 2000 \
-    --clip-grad 8.0 \
-    --adam-beta1 0.9 \
-    --adam-beta2 0.95 \
-    --adam-eps 1e-5 \
-    --no-position-embedding \
-    --use-rotary-position-embeddings \
-    --swiglu \
-    --normalization RMSNorm \
-    --disable-bias-linear \
-    --untie-embeddings-and-output-weights \
-    --hidden-dropout 0. \
-    --attention-dropout 0. \
-    --no-masked-softmax-fusion \
-    --no-bias-gelu-fusion \
-    --no-bias-dropout-fusion \
-    --profile \
-    --profile-step-start $PROFILE_STEP_START \
-    --profile-step-end $PROFILE_STEP_END \
-    --profile-ranks $profile_ranks \
-    --allow-padding-num-layers \
-    --no-barrier-with-level-1-timing \
+    ...
 "
 
 DATA_ARGS="
     --data-path $DATA_PATH \
     --tokenizer-type GPTSentencePieceTokenizer \
-    --tokenizer-model /workspace/data/zb_sample_dataset/tokenizers/tokenizer.model \
-    --vocab-size 32004 \
-    --split 949,50,1
+    ...
 "
 
-OUTPUT_ARGS="
-    --log-interval 1 \
-    --save-interval 10000 \
-    --eval-interval 1000 \
-    --eval-iters 10
-"
-
-TIMING_ARGS="
-    --timers-save $TIMER_SAVE_PATH \
-    --timing-log-level $TIMING_LOG_LEVEL \
-    --timing-log-option all
-"
-
-if [ -n "${HOSTFILE:-}" ]; then
-    CLUSTER_MPI_ARGS="
-        --hostfile $HOSTFILE \
-        --mca plm_rsh_num_concurrent 600 \
-        --mca routed_radix 600 \
-        --mca btl_tcp_if_include bond0 \
-        --mca oob_tcp_if_include bond0 \
-        --mca btl_openib_allow_ib false \
-        -x HOROVOD_MPI_THREADS_DISABLE=1 \
-        -x NCCL_IB_DISABLE=0 \
-        -x NCCL_IB_GID_INDEX=3 \
-        -x NCCL_IB_HCA=mlx5 \
-        -x NCCL_IB_QPS_PER_CONNECTION=8 \
-        -x NCCL_IB_TIMEOUT=19 \
-        -x NCCL_NET_OVERHEAD=1000 \
-    "
-fi
+PP_ARGS="$PP_ARGS --num-waves-per-pipeline $WAVE_SIZE"
 
 mkdir -p logs
 set -x
-# --num-layers-per-virtual-pipeline-stage $PP_l \
-# nsys profile -s none -t nvtx,cuda \
-#     --output myrun.nsys-rep \
-#     --force-overwrite true \
-#     --capture-range=cudaProfilerApi \
-#     --capture-range-end=stop \
 mpirun --allow-run-as-root \
         ${CLUSTER_MPI_ARGS:-} \
         --mca btl self,tcp \
@@ -187,22 +111,11 @@ mpirun --allow-run-as-root \
         -x PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:21 \
         -x MASTER_ADDR=$MASTER_ADDR -x MASTER_PORT=6005 \
     python3 ../../pretrain_gpt.py \
-    --use-distributed-optimizer \
-    --accumulate-allreduce-grads-in-fp32 \
-    --initial-loss-scale 1 \
-    --use-flash-attn \
     $PP_ARGS \
-    --tensor-model-parallel-size $TP \
-    --pipeline-model-parallel-size $PP \
-    --context-parallel-size $CP \
     $CKPT_ARGS \
     ${TP_OVERLAP_ARGS:-} \
-    --manual-gc \
-    --manual-gc-interval 9999 \
     $GPT_ARGS \
     $DATA_ARGS \
     $OUTPUT_ARGS \
     $TIMING_ARGS \
     2>&1 | tee logs/llama_$TS.txt
-# --sequence-parallel \
-# --use-mcore-models \
