@@ -6,7 +6,7 @@ set -euo pipefail
 
 source ./llama-7b
 
-export TRAIN_ITERS=200
+export TRAIN_ITERS=5
 
 # 为什么这么长
 # export SEQ_LENGTH=12288
