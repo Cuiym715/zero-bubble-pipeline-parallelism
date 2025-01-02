@@ -36,7 +36,7 @@ PP_ARGS=
 if [ $PP_SCHEDULE == "gpipe" ]; then
     echo "gpipe"
     sleep 3
-    PP_ARGS="--use-gpipe"
+    PP_ARGS="--enable-gpipe"
 elif [ $PP_SCHEDULE == "1F1B" ]; then
     echo "1F1B"
     sleep 3
@@ -45,7 +45,12 @@ elif [ $PP_SCHEDULE == "i-1F1B" ]; then
     sleep 3
     PP_ARGS="--num-layers-per-virtual-pipeline-stage 2"
 elif [ $PP_SCHEDULE == "hanayo" ]; then
+    echo "hanayo"
+    sleep 3
     PP_ARGS="--num-waves-per-pipeline $WAVE_SIZE"
+elif [ $PP_SCHEDULE == "dynamic" ]; then
+    PP_ARGS="--num-waves-per-pipeline $WAVE_SIZE \
+    --enable-zero-bubble"
 elif [ $PP_SCHEDULE == "v-zb" ]; then
     ENABLE_ZERO_BUBBLE=1
     PP_ARGS="--zero-bubble-v-schedule"

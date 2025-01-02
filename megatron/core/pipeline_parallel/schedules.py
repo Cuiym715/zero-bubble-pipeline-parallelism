@@ -11,16 +11,27 @@ from megatron.core import parallel_state
 from megatron.core.enums import ModelType
 from megatron.core.pipeline_parallel import p2p_communication
 from megatron.core.parallel_state import (
-    get_pipeline_model_parallel_next_rank,
+    get_pipeline_model_parallel_next_rank,                
     get_pipeline_model_parallel_prev_rank,
 )
 from megatron.core.utils import get_attr_wrapped_model, get_model_config, get_model_type, reset_random_state
 import time
-import json
+import random
 
 # Types
 Shape = Union[List[int], torch.Size]
 
+simulate_index = 0
+with open("/workspace/zero-bubble-pipeline-parallelism/sleep_times.txt", 'r') as f:
+    sleep_times = [float(line.strip()) for line in f.readlines()]
+def simulate_moe_sleep():
+    return
+    global simulate_index
+    if simulate_index >= len(sleep_times):
+        simulate_index = 0
+    simulate_index += 1
+    torch.cuda.synchronize()
+    time.sleep(sleep_times[simulate_index])
 
 def get_forward_backward_func():
     """Retrieves the appropriate forward_backward function given the
@@ -96,6 +107,11 @@ def get_forward_backward_func():
     collect_non_loss_data (optional, bool, default=False): TODO
 
     """
+    pipeline_model_parallel_size = parallel_state.get_pipeline_model_parallel_world_size()
+    if pipeline_model_parallel_size > 1:
+        if parallel_state.get_wavepipe_model_parallel_world_size() is not None and get_args().enable_zero_bubble:
+            from megatron.core.pipeline_parallel.dynamic import forward_backward_pipelining_with_dynamicPP
+            return forward_backward_pipelining_with_dynamicPP
     if get_args().enable_zero_bubble:
         from megatron.core.pipeline_parallel.zb_schedules import get_zero_bubble_forward_backward_func
         return get_zero_bubble_forward_backward_func()
@@ -215,6 +231,9 @@ def forward_step(
             data = loss_func(output_tensor, non_loss_data=True)
             forward_data_store.append(data)
 
+    # 模拟moe
+    simulate_moe_sleep()
+
     if config.timers is not None:
         config.timers('forward-compute').stop()
 
@@ -278,11 +297,14 @@ def backward_step(input_tensor, output_tensor, output_tensor_grad, model_type, c
 
     # Backward pass.
     if output_tensor_grad[0] is None and config.grad_scale_func is not None:
+        # print_rank_0(f"log@_@: grad_scale_func")
         output_tensor[0] = config.grad_scale_func(output_tensor[0])
 
     if config.deallocate_pipeline_outputs:
+        # print_rank_0(f"log@_@: deallocate_pipeline_outputs")
         custom_backward(output_tensor[0], output_tensor_grad[0])
     else:
+        # print_rank_0(f"log@_@: not deallocate_pipeline_outputs")
         torch.autograd.backward(output_tensor[0], grad_tensors=output_tensor_grad[0])
 
     # Collect the grad of the input_tensor.
@@ -306,6 +328,9 @@ def backward_step(input_tensor, output_tensor, output_tensor_grad, model_type, c
             input_tensor_grad[-1].add_(output_tensor_grad[1])
     if unwrap_input_tensor_grad:
         input_tensor_grad = input_tensor_grad[0]
+
+    # 模拟moe
+    simulate_moe_sleep()
 
     if config.timers is not None:
         config.timers('backward-compute').stop()
@@ -1141,12 +1166,15 @@ def forward_backward_pipelining_without_interleaving(
     disable_grad_sync()
 
     # Compute number of warmup microbatches.
-    num_warmup_microbatches = (
-        parallel_state.get_pipeline_model_parallel_world_size()
-        - parallel_state.get_pipeline_model_parallel_rank()
-        - 1
-    )
-    num_warmup_microbatches = min(num_warmup_microbatches, num_microbatches)
+    if get_args().enable_gpipe:
+        num_warmup_microbatches = num_microbatches
+    else:
+        num_warmup_microbatches = (
+            parallel_state.get_pipeline_model_parallel_world_size()
+            - parallel_state.get_pipeline_model_parallel_rank()
+            - 1
+        )
+        num_warmup_microbatches = min(num_warmup_microbatches, num_microbatches)
     num_microbatches_remaining = num_microbatches - num_warmup_microbatches
 
     # Checkpoint the activations of partial Transformer layers in a number of micro-batches
@@ -1458,6 +1486,8 @@ def forward_backward_pipelining_with_wavepipe(
     #     num_forward_steady_microbatches = 0
     #     num_microbatches_remaining = 0
     # else:
+    assert num_microbatches == pipeline_parallel_size, \
+        "number of microbatches must be equal to pipeline parallel size" 
     assert num_microbatches % pipeline_parallel_size == 0, \
         "number of microbatches must be divisible by pipeline parallel size"
     # num_warmup_microbatches = num_model_chunks * pipeline_parallel_size - \
@@ -1484,7 +1514,7 @@ def forward_backward_pipelining_with_wavepipe(
     rank = torch.distributed.get_rank()
     args = get_args()
     log_file_name = args.timers_save+'/log%d.txt'%rank
-    with open(log_file_name, 'a') as log_file:
+    with open(log_file_name, 'w') as log_file:
         log_file.write(f"--------------wavepipe--------------------\n")
         log_file.write(f"pipeline_parallel_size: {pipeline_parallel_size}\n")
         log_file.write(f"pipeline_parallel_rank: {pipeline_parallel_rank}\n")
@@ -1572,12 +1602,12 @@ def forward_backward_pipelining_with_wavepipe(
         if not forward_only:
             input_tensors[model_chunk_id].append(input_tensor)
                 
-        with open(log_file_name, 'a') as log_file:
-            log_file.write(f"""time: {time.time()}, forward_step: batchID{microbatchID}, modelID{model_chunk_id}""")
-            if input_tensor is not None:
-                log_file.write(f""", input_tensor: {input_tensor.shape}\n""")
-            else:
-                log_file.write(f""", input_tensor: None\n""")
+        # with open(log_file_name, 'a') as log_file:
+        #     log_file.write(f"""time: {time.time()}, forward_step: batchID{microbatchID}, modelID{model_chunk_id}""")
+        #     if input_tensor is not None:
+        #         log_file.write(f""", input_tensor: {input_tensor.shape}\n""")
+        #     else:
+        #         log_file.write(f""", input_tensor: None\n""")
         
         # Decide to checkpoint all layers' activations of the current micro-batch
         if max_outstanding_backprops is not None:
@@ -1599,18 +1629,18 @@ def forward_backward_pipelining_with_wavepipe(
             detached_output_tensor = output_tensor.detach()
             detached_output_tensor.requires_grad_()
             input_tensor=detached_output_tensor
-            with open(log_file_name, 'a') as log_file:
-                log_file.write(f"""time: {int(time.time())}, output tensor = {output_tensor.shape}, input tensor = {input_tensor.shape}\n""")
+        #     with open(log_file_name, 'a') as log_file:
+        #         log_file.write(f"""time: {int(time.time())}, output tensor = {output_tensor.shape}, input tensor = {input_tensor.shape}\n""")
         elif pipeline_parallel_rank == (pipeline_parallel_size - 1) and (model_chunk_id % 2) == 0:
             detached_output_tensor = output_tensor.detach()
             detached_output_tensor.requires_grad_()
             input_tensor=detached_output_tensor
-            with open(log_file_name, 'a') as log_file:
-                log_file.write(f"""time: {int(time.time())}, output tensor = {output_tensor.shape}, input tensor = {input_tensor.shape}\n""")
+        #     with open(log_file_name, 'a') as log_file:
+        #         log_file.write(f"""time: {int(time.time())}, output tensor = {output_tensor.shape}, input tensor = {input_tensor.shape}\n""")
         else:
             p2p_communication.send_forward(output_tensor, config)
-            with open(log_file_name, 'a') as log_file:
-                log_file.write(f"""time: {int(time.time())}, send forward\n""")
+            # with open(log_file_name, 'a') as log_file:
+            #     log_file.write(f"""time: {int(time.time())}, send forward\n""")
 
         if not forward_only:
             output_tensors[model_chunk_id].append(output_tensor)
@@ -1638,22 +1668,22 @@ def forward_backward_pipelining_with_wavepipe(
     for iter in range(num_iters):
         parallel_state.set_virtual_pipeline_model_parallel_rank(modelID2)
         if pipeline_parallel_rank != (pipeline_parallel_size - 1):
-            with open(log_file_name, 'a') as log_file:
-                log_file.write(f"   receiving from next stage\n")
+            # with open(log_file_name, 'a') as log_file:
+            #     log_file.write(f"   receiving from next stage\n")
             input_tensor = p2p_communication.recv_forward(tensor_shape, config)
-        with open(log_file_name, 'a') as log_file:
-            log_file.write(f"steady forward\n")
+        # with open(log_file_name, 'a') as log_file:
+        #     log_file.write(f"steady forward\n")
         for k in range(0, num_forward_steady_microbatches, 2):
             microbatchID = batchID2
             model_chunk_id = modelID2
             batchID2 += 1
             
-            with open(log_file_name, 'a') as log_file:
-                log_file.write(f"""time: {time.time()}, forward_step: batchID{microbatchID}, modelID{model_chunk_id}""")
-                if input_tensor is not None:
-                    log_file.write(f""", input_tensor: {input_tensor.shape}\n""")
-                else:
-                    log_file.write(f""", input_tensor: None\n""")
+            # with open(log_file_name, 'a') as log_file:
+            #     log_file.write(f"""time: {time.time()}, forward_step: batchID{microbatchID}, modelID{model_chunk_id}""")
+            #     if input_tensor is not None:
+            #         log_file.write(f""", input_tensor: {input_tensor.shape}\n""")
+            #     else:
+            #         log_file.write(f""", input_tensor: None\n""")
             # TODO: Decide to checkpoint all layers' activations of the current micro-batch
             checkpoint_activations_microbatch = None
             parallel_state.set_virtual_pipeline_model_parallel_rank(model_chunk_id)
@@ -1669,15 +1699,15 @@ def forward_backward_pipelining_with_wavepipe(
             memory.append((time.time(), torch.cuda.memory_allocated()))
             
             if pipeline_parallel_rank != 0:
-                with open(log_file_name, 'a') as log_file:
-                    log_file.write(f"   receiving from prev stage\n")
+                # with open(log_file_name, 'a') as log_file:
+                #     log_file.write(f"   receiving from prev stage\n")
                 parallel_state.set_virtual_pipeline_model_parallel_rank(modelID1)
                 input_tensor = p2p_communication.recv_forward(tensor_shape, config) 
                 
-                with open(log_file_name, 'a') as log_file:
-                    log_file.write(f"   received {input_tensor.shape}\n")
-                with open(log_file_name, 'a') as log_file:
-                    log_file.write(f"   sending to prev stage {output_tensor.shape}\n")
+                # with open(log_file_name, 'a') as log_file:
+                #     log_file.write(f"   received {input_tensor.shape}\n")
+                # with open(log_file_name, 'a') as log_file:
+                #     log_file.write(f"   sending to prev stage {output_tensor.shape}\n")
                 parallel_state.set_virtual_pipeline_model_parallel_rank(modelID2)
                 p2p_communication.send_forward(output_tensor, config)
                 # with open(log_file_name, 'a') as log_file:
@@ -1700,8 +1730,8 @@ def forward_backward_pipelining_with_wavepipe(
             model_chunk_id = modelID1
             batchID1 += 1
                     
-            with open(log_file_name, 'a') as log_file:
-                log_file.write(f"""time: {time.time()}, forward_step: batchID{microbatchID}, modelID{model_chunk_id}\n""")
+            # with open(log_file_name, 'a') as log_file:
+            #     log_file.write(f"""time: {time.time()}, forward_step: batchID{microbatchID}, modelID{model_chunk_id}\n""")
             # TODO: Decide to checkpoint all layers' activations of the current micro-batch
             checkpoint_activations_microbatch = None
             parallel_state.set_virtual_pipeline_model_parallel_rank(model_chunk_id)
@@ -1718,11 +1748,11 @@ def forward_backward_pipelining_with_wavepipe(
             
             
             if pipeline_parallel_rank != (pipeline_parallel_size - 1):
-                with open(log_file_name, 'a') as log_file:
-                    log_file.write(f"   sending to next stage %s\n"%(str(output_tensor==None)))
+                # with open(log_file_name, 'a') as log_file:
+                #     log_file.write(f"   sending to next stage %s\n"%(str(output_tensor==None)))
                 p2p_communication.send_forward(output_tensor, config)
-                with open(log_file_name, 'a') as log_file:
-                    log_file.write(f"   receiving from next stage\n")
+                # with open(log_file_name, 'a') as log_file:
+                #     log_file.write(f"   receiving from next stage\n")
                 parallel_state.set_virtual_pipeline_model_parallel_rank(modelID2)
                 input_tensor = p2p_communication.recv_forward(tensor_shape, config)             
             else:
@@ -1755,8 +1785,8 @@ def forward_backward_pipelining_with_wavepipe(
         #         log_file.write(f"%d, len=%d\n"%(l, len(input_tensors[l])))
         #     log_file.write(f"------\n")
             
-        with open(log_file_name, 'a') as log_file:
-            log_file.write(f"1f1b\n")
+        # with open(log_file_name, 'a') as log_file:
+        #     log_file.write(f"1f1b\n")
         for k in range(num_microbatches_remaining):
             microbatchID = batchID2
             model_chunk_id = modelID2
@@ -1766,12 +1796,12 @@ def forward_backward_pipelining_with_wavepipe(
             
             # input_tensors[model_chunk_id].append(input_tensor)
             
-            with open(log_file_name, 'a') as log_file:
-                log_file.write(f"""time: {time.time()}, forward_step: batchID{microbatchID}, modelID{model_chunk_id}""")
-                if input_tensor is not None:
-                    log_file.write(f""", input_tensor: {input_tensor.shape}\n""")
-                else:
-                    log_file.write(f""", input_tensor: None\n""")
+            # with open(log_file_name, 'a') as log_file:
+            #     log_file.write(f"""time: {time.time()}, forward_step: batchID{microbatchID}, modelID{model_chunk_id}""")
+            #     if input_tensor is not None:
+            #         log_file.write(f""", input_tensor: {input_tensor.shape}\n""")
+            #     else:
+            #         log_file.write(f""", input_tensor: None\n""")
             # TODO: Decide to checkpoint all layers' activations of the current micro-batch
             checkpoint_activations_microbatch = None
             parallel_state.set_virtual_pipeline_model_parallel_rank(model_chunk_id)
@@ -1815,9 +1845,9 @@ def forward_backward_pipelining_with_wavepipe(
                 input_tensor = input_tensors[back_modelID2].pop(0)
                 output_tensor = output_tensors[back_modelID2].pop(0)
                 
-                with open(log_file_name, 'a') as log_file:
-                    log_file.write(f"""time: {time.time()}, backward_step: batchID{microbatchID}, modelID{model_chunk_id}\n""")
-                    # log_file.write(f"   output tensor grad %s\n"%str(output_tensor_grad))
+                # with open(log_file_name, 'a') as log_file:
+                #     log_file.write(f"""time: {time.time()}, backward_step: batchID{microbatchID}, modelID{model_chunk_id}\n""")
+                #     # log_file.write(f"   output tensor grad %s\n"%str(output_tensor_grad))
                     
                 parallel_state.set_virtual_pipeline_model_parallel_rank(model_chunk_id)
                 input_tensor_grad = backward_step(
@@ -1865,8 +1895,8 @@ def forward_backward_pipelining_with_wavepipe(
                 back_modelID2 -= 2
                 
         if not forward_only:    
-            with open(log_file_name, 'a') as log_file:
-                log_file.write(f"steady backward\n")    
+            # with open(log_file_name, 'a') as log_file:
+            #     log_file.write(f"steady backward\n")    
 
             for k in range(0, num_forward_steady_microbatches, 2):
                 microbatchID = back_batchID1
@@ -1877,8 +1907,8 @@ def forward_backward_pipelining_with_wavepipe(
                 input_tensor = input_tensors[model_chunk_id].pop(0)
                 output_tensor = output_tensors[model_chunk_id].pop(0)
                 
-                with open(log_file_name, 'a') as log_file:
-                    log_file.write(f"""time: {time.time()}, backward_step: batchID{microbatchID}, modelID{model_chunk_id}\n""")
+                # with open(log_file_name, 'a') as log_file:
+                #     log_file.write(f"""time: {time.time()}, backward_step: batchID{microbatchID}, modelID{model_chunk_id}\n""")
 
                 parallel_state.set_virtual_pipeline_model_parallel_rank(model_chunk_id)
                 if pipeline_parallel_rank != (pipeline_parallel_size - 1):
@@ -1911,8 +1941,8 @@ def forward_backward_pipelining_with_wavepipe(
                 input_tensor = input_tensors[model_chunk_id].pop(0)
                 output_tensor = output_tensors[model_chunk_id].pop(0)
                 
-                with open(log_file_name, 'a') as log_file:
-                    log_file.write(f"""time: {time.time()}, backward_step: batchID{microbatchID}, modelID{model_chunk_id}\n""")
+                # with open(log_file_name, 'a') as log_file:
+                #     log_file.write(f"""time: {time.time()}, backward_step: batchID{microbatchID}, modelID{model_chunk_id}\n""")
                 
                 parallel_state.set_virtual_pipeline_model_parallel_rank(back_modelID2)
                 if pipeline_parallel_rank != 0:
@@ -1944,15 +1974,15 @@ def forward_backward_pipelining_with_wavepipe(
         if iter == num_iters - 1:
             break
                     
-        with open(log_file_name, 'a') as log_file:
-            log_file.write(f"next iteration\n")    
+        # with open(log_file_name, 'a') as log_file:
+        #     log_file.write(f"next iteration\n")    
         modelID1 = 0
         batchID1 += pipeline_parallel_size
         modelID2 = 1
         batchID2 += pipeline_parallel_size
-        with open(log_file_name, 'a') as log_file:
-            log_file.write(f"modelID1: {modelID1}, batchID1: {batchID1}\n")
-            log_file.write(f"modelID2: {modelID2}, batchID2: {batchID2}\n")
+        # with open(log_file_name, 'a') as log_file:
+        #     log_file.write(f"modelID1: {modelID1}, batchID1: {batchID1}\n")
+        #     log_file.write(f"modelID2: {modelID2}, batchID2: {batchID2}\n")
         for k in range(num_forward_warmup_microbatches):
             if not forward_only:
                 microbatchID = back_batchID1
@@ -1962,8 +1992,8 @@ def forward_backward_pipelining_with_wavepipe(
                 input_tensor = input_tensors[model_chunk_id].pop(0)
                 output_tensor = output_tensors[model_chunk_id].pop(0)
                 
-                with open(log_file_name, 'a') as log_file:
-                    log_file.write(f"""time: {time.time()}, backward_step: batchID{microbatchID}, modelID{model_chunk_id}\n""")
+                # with open(log_file_name, 'a') as log_file:
+                #     log_file.write(f"""time: {time.time()}, backward_step: batchID{microbatchID}, modelID{model_chunk_id}\n""")
                 
                 parallel_state.set_virtual_pipeline_model_parallel_rank(model_chunk_id)
                 if pipeline_parallel_rank != (pipeline_parallel_size - 1):
@@ -1984,12 +2014,12 @@ def forward_backward_pipelining_with_wavepipe(
             if not forward_only:
                 input_tensors[model_chunk_id].append(input_tensor)
                     
-            with open(log_file_name, 'a') as log_file:
-                log_file.write(f"""time: {time.time()}, forward_step: batchID{microbatchID}, modelID{model_chunk_id}""")
-                if input_tensor is not None:
-                    log_file.write(f""", input_tensor: {input_tensor.shape}\n""")
-                else:
-                    log_file.write(f""", input_tensor: None\n""")
+            # with open(log_file_name, 'a') as log_file:
+            #     log_file.write(f"""time: {time.time()}, forward_step: batchID{microbatchID}, modelID{model_chunk_id}""")
+            #     if input_tensor is not None:
+            #         log_file.write(f""", input_tensor: {input_tensor.shape}\n""")
+            #     else:
+            #         log_file.write(f""", input_tensor: None\n""")
             
             # TODO: Decide to checkpoint all layers' activations of the current micro-batch
             checkpoint_activations_microbatch = None        
@@ -2010,18 +2040,18 @@ def forward_backward_pipelining_with_wavepipe(
                 detached_output_tensor = output_tensor.detach()
                 detached_output_tensor.requires_grad_()
                 input_tensor=detached_output_tensor
-                with open(log_file_name, 'a') as log_file:
-                    log_file.write(f"""time: {int(time.time())}, output tensor = {output_tensor.shape}, input tensor = {input_tensor.shape}\n""")
+            #     with open(log_file_name, 'a') as log_file:
+            #         log_file.write(f"""time: {int(time.time())}, output tensor = {output_tensor.shape}, input tensor = {input_tensor.shape}\n""")
             elif pipeline_parallel_rank == (pipeline_parallel_size - 1) and (model_chunk_id % 2) == 0:
                 detached_output_tensor = output_tensor.detach()
                 detached_output_tensor.requires_grad_()
                 input_tensor=detached_output_tensor
-                with open(log_file_name, 'a') as log_file:
-                    log_file.write(f"""time: {int(time.time())}, output tensor = {output_tensor.shape}, input tensor = {input_tensor.shape}\n""")
+            #     with open(log_file_name, 'a') as log_file:
+            #         log_file.write(f"""time: {int(time.time())}, output tensor = {output_tensor.shape}, input tensor = {input_tensor.shape}\n""")
             else:
                 p2p_communication.send_forward(output_tensor, config)
-                with open(log_file_name, 'a') as log_file:
-                    log_file.write(f"""time: {int(time.time())}, send forward\n""")
+                # with open(log_file_name, 'a') as log_file:
+                #     log_file.write(f"""time: {int(time.time())}, send forward\n""")
 
             if not forward_only:
                 output_tensors[model_chunk_id].append(output_tensor)
@@ -2044,8 +2074,8 @@ def forward_backward_pipelining_with_wavepipe(
             input_tensor = input_tensors[model_chunk_id].pop(0)
             output_tensor = output_tensors[model_chunk_id].pop(0)
             
-            with open(log_file_name, 'a') as log_file:
-                log_file.write(f"""time: {time.time()}, backward_step: batchID{microbatchID}, modelID{model_chunk_id}\n""")
+            # with open(log_file_name, 'a') as log_file:
+            #     log_file.write(f"""time: {time.time()}, backward_step: batchID{microbatchID}, modelID{model_chunk_id}\n""")
             
             parallel_state.set_virtual_pipeline_model_parallel_rank(model_chunk_id)
             if pipeline_parallel_rank != (pipeline_parallel_size - 1):
@@ -2093,9 +2123,9 @@ def forward_backward_pipelining_with_wavepipe(
         assert len(output_tensors[i]) == 0,\
             f"output_tensors[{i}] is not empty"
 
-    with open(log_file_name, 'a') as log_file:
-        log_file.write(f"---forward_data_store---\n")
-        log_file.write(f"{len(forward_data_store)}\n")
-        log_file.write(f"------\n")
+    # with open(log_file_name, 'a') as log_file:
+    #     log_file.write(f"---forward_data_store---\n")
+    #     log_file.write(f"{len(forward_data_store)}\n")
+    #     log_file.write(f"------\n")
     
     return forward_data_store

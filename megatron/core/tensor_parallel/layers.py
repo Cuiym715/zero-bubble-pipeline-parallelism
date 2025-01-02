@@ -433,8 +433,9 @@ class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
 
         if ctx.gradient_accumulation_fusion:
             if get_args().enable_zero_bubble:
-                # if torch.distributed.get_rank() == 0:
-                #     print("log@_@: pass W")
+                log_file_name = get_args().timers_save+'/log%d.txt'%torch.distributed.get_rank()
+                # with open(log_file_name, 'a') as f:
+                #     f.write("in backward step: save W\n")
                 from megatron.core.weight_grad_store import WeightGradStore
                 if weight.main_grad.dtype == torch.float32:
                     WeightGradStore.put(

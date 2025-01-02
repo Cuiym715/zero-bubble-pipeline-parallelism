@@ -23,6 +23,13 @@ class WeightGradStore:
         #     print(f"flush cache: {cls.cache}")
         cls.weight_grad_queue[chunk].put(cls.cache)
         cls.cache = []
+      
+    @classmethod  
+    def flush_as_matmul(cls, chunk=0):
+        # 不打包cache，直接放入队列
+        for item in cls.cache:
+            cls.weight_grad_queue[chunk].put([item])
+        cls.cache = []
 
     @classmethod
     def pop(cls, chunk=0):
@@ -34,6 +41,14 @@ class WeightGradStore:
                 func(total_input, grad_output, weight.main_grad)
         else:
             raise Exception("Pop empty queue.")
+        
+    @classmethod
+    def is_empty(cls, chunk=0):
+        return cls.weight_grad_queue[chunk].empty()
+    
+    @classmethod
+    def get_size(cls, chunk=0):
+        return cls.weight_grad_queue[chunk].qsize()
 
     @classmethod
     def clear(cls, model, chunk=0):

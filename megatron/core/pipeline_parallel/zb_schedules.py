@@ -702,6 +702,8 @@ class ZeroBubbleVPipeScheduler:
             >= get_args().zero_bubble_pipeline_timers_start_iter
         )
         bootstrap_and_profile_p2p_communication(config, [tensor_shape], [tensor_shape])
+        # TODO: DEBUG，但是这是用来profile然后获得固定调度的
+        # self.run_timer = None
         self.run_timer = run_timer
 
         self.schedules = schedule

@@ -179,6 +179,8 @@ def validate_args(args, defaults={}):
             print('WARNING: Setting args.overlap_p2p_comm to False since non-interleaved '
                   'schedule does not support overlapping p2p communication')
     if args.num_waves_per_pipeline is not None:
+        # TODO: 尝试overlap comm
+        args.overlap_p2p_comm = True
         assert args.num_layers_per_virtual_pipeline_stage is None, \
             'must choose one between virtual pipeline & WavePipe'
         # TODO 判断num_micro_batch==global_size
@@ -1195,9 +1197,9 @@ def _add_distributed_args(parser):
                        help='Number of layers per virtual pipeline stage')
     group.add_argument('--num-waves-per-pipeline', type=int, default=None,
                        help='Number of waves per pipeline')
-    group.add_argument('--use-gpipe', action='store_true',
-                       help='use gpipe parallelism',
-                       dest='use_gpipe')
+    group.add_argument('--enable-gpipe', action='store_true',
+                       help='enable gpipe parallelism',
+                       dest='enable_gpipe')
     group.add_argument('--enable-chimera', action='store_true',
                        help='Enable chimera parallelism',
                        dest='enable_chimera')

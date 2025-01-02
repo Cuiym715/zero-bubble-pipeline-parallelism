@@ -219,6 +219,10 @@ def pretrain(train_valid_test_dataset_provider,
                                    iteration, process_non_loss_data_func, config,
                                    verbose=True, write_to_tensorboard=not args.skip_train)
 
+    if torch.distributed.is_initialized():
+        torch.distributed.barrier()
+    if torch.distributed.is_initialized():
+        torch.distributed.destroy_process_group()
 
 def update_train_iters(args):
 
@@ -799,6 +803,11 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
     """Train the model function."""
     args = get_args()
     timers = get_timers()
+    
+    rank = torch.distributed.get_rank()
+    log_file_name = args.timers_save+'/log%d.txt'%rank
+    with open(log_file_name, 'w') as log_file:
+        log_file.write(f"rank: {rank} start training\n")
 
     # Write args to tensorboard
     write_args_to_tensorboard()
@@ -848,7 +857,7 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
         gc.collect()
         
     with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-        schedule=torch.profiler.schedule(wait=30, warmup=5, active=1),
+        schedule=torch.profiler.schedule(wait=0, warmup=5, active=1),
         on_trace_ready=torch.profiler.tensorboard_trace_handler(args.timers_save+'/profiler_logs'),
         record_shapes=False,
         profile_memory=False,

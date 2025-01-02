@@ -1,5 +1,5 @@
 # Copyright (c) 2022, NVIDIA CORPORATION.  All rights reserved.
-# Timestamp
+# cudaEvent
 
 """Megatron timers."""
 
@@ -46,7 +46,7 @@ class DummyTimer(TimerBase):
     def start(self, barrier=False):
         return
 
-    def stop(self, barrier=False, later_sync=False):
+    def stop(self, barrier=False):
         return
     
     def syn(self):
@@ -62,122 +62,6 @@ class DummyTimer(TimerBase):
 
 
 class Timer(TimerBase):
-    """
-    Comment on using `barrier`: If this flag is passed, then all
-    the caller processes will wait till all reach the timing routine.
-    It is up to the user to make sure all the ranks in `barrier_group`
-    call it otherwise, it will result in a hang.
-    Comment on `barrier_group`: By default it is set to None which
-    in torch distributed land, it will result in the global communicator.
-    """
-
-    def __init__(self, name):
-        super().__init__(name)
-        self._elapsed = 0.0
-        self._started = False
-        # self._historical_time = []
-        self._start_time_queue = []
-        self._end_time_queue = []
-        # Note that None will default to the global process group
-        self._barrier_group = None
-        self._start_time = time.time()
-
-
-    def set_barrier_group(self, barrier_group):
-        self._barrier_group = barrier_group
-
-
-    def start(self, barrier=False, record = True):
-        """Start the timer."""
-        assert not self._started, 'timer has already been started'
-        if barrier:
-            torch.distributed.barrier(group=self._barrier_group)
-        if 'compute' not in self.name:
-            torch.cuda.synchronize()
-        self._start_time = time.time()
-        self._started = True
-        if record:
-            self._start_time_queue.append(self._start_time)
-        # if self.name == 'forward-compute':
-        #     print(torch.distributed.get_rank(), 'forward compute start time:', self._start_time)
-        # if self.name == 'backward-compute':
-        #     print(torch.distributed.get_rank(), 'backward compute start time:', self._start_time)
-
-
-    def stop(self, barrier=False, record=True):
-        """Stop the timer."""
-        assert self._started, 'timer is not started'
-        if barrier:
-            torch.distributed.barrier(group=self._barrier_group)
-        if self.name != 'w-compute':
-            torch.cuda.synchronize()
-        end_time = time.time()
-        self._elapsed += (end_time - self._start_time)
-        self._started = False
-        if record:
-            self._end_time_queue.append(end_time)
-            # self._historical_time.append(time.time() - self._start_time)
-        # if self.name == 'forward-compute':
-        #     print(torch.distributed.get_rank(), 'forward compute end time:', end_time)
-        # if self.name == 'backward-compute':
-        #     print(torch.distributed.get_rank(), 'backward compute end time:', end_time)
-
-    def syn(self):
-        raise NotImplementedError
-
-    def reset(self):
-        """Reset timer."""
-        self._elapsed = 0.0
-        self._started = False
-
-
-    def elapsed(self, reset=True, barrier=False):
-        """Calculate the elapsed time."""
-        _started = self._started
-        # If the timing in progress, end it first.
-        if self._started:
-            self.stop(barrier=barrier, record=False)
-        # Get the elapsed time.
-        _elapsed = self._elapsed
-        # Reset the elapsed time
-        if reset:
-            self.reset()
-        # If timing was in progress, set it back.
-        if _started:
-            self.start(barrier=barrier)
-        return _elapsed
-    
-    def record(self, record_path):
-        # if len(self._historical_time) == 0:
-        #     return
-        if len(self._start_time_queue) == 0:
-            return
-        try:
-            with open(record_path, 'r') as file:
-                data = json.load(file)
-        except FileNotFoundError:
-            data = {}
-        # Update data with current timer information
-        if self.name in data.keys():
-            # data[self.name].extend(self._historical_time)
-            data[self.name]['start'].extend(self._start_time_queue)
-            data[self.name]['end'].extend(self._end_time_queue)
-        else:
-            # data[self.name] = self._historical_time
-            data[self.name] = {}
-            data[self.name]['start'] = self._start_time_queue
-            data[self.name]['end'] = self._end_time_queue
-        # Write updated data back to file
-        with open(record_path, 'w') as file:
-            json.dump(data, file, indent=4)
-        # Clear historical elapsed times
-        # self._historical_time = []
-        self._start_time_queue = []
-        self._end_time_queue = []
-
-
-
-class Timer_CudaEvent(TimerBase):
     """
     Timer class using CUDA events for precise timing without global synchronization.
     """
@@ -277,6 +161,8 @@ class Timer_CudaEvent(TimerBase):
             json.dump(data, file, indent=4)
 
 
+
+
 class Timers:
     """Group of timers."""
 
@@ -310,29 +196,7 @@ class Timers:
         # the timers class, just ignore it and return a dummy timer.
         if log_level > self._log_level:
             return self._dummy_timer
-        # self._timers[name] = Timer(name)
-        # self._log_levels[name] = log_level
-        # return self._timers[name]
-        
-        
         # Otherwise, initalize the timer and set the level.
-        # TODO: 因为有异步通信，所以loglevel=2的时候只记录计算，通信返回dummy timer
-        # if log_level >= 2:
-        #     if 'compute' not in name:
-        #         return self._dummy_timer
-        #     else:
-        #         self._timers[name] = Timer_CudaEvent(name)
-        # else:   
-        #     self._timers[name] = Timer(name)
-        # self._log_levels[name] = log_level
-        # return self._timers[name]
-        
-        
-        # Otherwise, initalize the timer and set the level.
-        # TODO: 因为有异步通信，所以loglevel=2的时候只记录计算，通信返回dummy timer
-        if log_level >= 2:
-            if 'compute' not in name:
-                return self._dummy_timer
         self._timers[name] = Timer(name)
         self._log_levels[name] = log_level
         return self._timers[name]
