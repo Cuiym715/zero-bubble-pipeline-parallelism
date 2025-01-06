@@ -37,6 +37,7 @@ def w_step(config, model_chunk_id):
 def wait_comm(handles, compute_stream, stored_activation_num, config):
     log_file_name = get_args().timers_save+'/log%d.txt'%torch.distributed.get_rank()
     compute_event = torch.cuda.Event(enable_timing=False, blocking=False)
+    comm_stream = torch.cuda.Stream()
     for handle in handles:
         if handle is None or handle[0].is_completed():
             continue
@@ -66,10 +67,13 @@ def wait_comm(handles, compute_stream, stored_activation_num, config):
         if config.timers is not None:
             # config.timers('w-compute').stop(later_sync=True)
             config.timers('w-compute').stop()
-        handle[0].wait()
+        # 通信任务分配到 comm_stream
+        with torch.cuda.stream(comm_stream):
+            handle[0].wait() 
     if config.timers is not None:
         # config.timers('w-compute').syn()
         pass
+    torch.cuda.synchronize()
     with open(log_file_name, 'a') as log_file:
         log_file.write(f"   done time: {time.time()}, w queue size 1:{WeightGradStore.get_size(1)}, 0:{WeightGradStore.get_size(0)}\n")
     return stored_activation_num
@@ -224,7 +228,7 @@ def forward_backward_pipelining_with_dynamicPP(
     # wait_handles = []
     # wait_handles = []
     wait_handles = []
-    compute_stream = torch.cuda.Stream()
+    compute_stream = torch.cuda.Stream(priority=-1)
     stored_activation_num = 0
     matmul_per_layer = 4 * micro_batch_size
     args = get_args()

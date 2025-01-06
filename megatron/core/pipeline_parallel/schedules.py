@@ -232,7 +232,8 @@ def forward_step(
             forward_data_store.append(data)
 
     # 模拟moe
-    simulate_moe_sleep()
+    # simulate_moe_sleep()
+    torch.cuda.synchronize()
 
     if config.timers is not None:
         config.timers('forward-compute').stop()
@@ -330,7 +331,8 @@ def backward_step(input_tensor, output_tensor, output_tensor_grad, model_type, c
         input_tensor_grad = input_tensor_grad[0]
 
     # 模拟moe
-    simulate_moe_sleep()
+    # simulate_moe_sleep()
+    torch.cuda.synchronize()    
 
     if config.timers is not None:
         config.timers('backward-compute').stop()

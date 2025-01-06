@@ -37,10 +37,10 @@ if [ $PP_SCHEDULE == "gpipe" ]; then
     echo "gpipe"
     sleep 3
     PP_ARGS="--enable-gpipe"
-elif [ $PP_SCHEDULE == "1F1B" ]; then
+elif [ $PP_SCHEDULE == "1f1b" ]; then
     echo "1F1B"
     sleep 3
-elif [ $PP_SCHEDULE == "i-1F1B" ]; then
+elif [ $PP_SCHEDULE == "i-1f1b" ]; then
     echo "i-1F1B"
     sleep 3
     PP_ARGS="--num-layers-per-virtual-pipeline-stage 2"
@@ -153,6 +153,7 @@ TIMING_ARGS="
 if [ -n "${HOSTFILE:-}" ]; then
     CLUSTER_MPI_ARGS="
         --hostfile $HOSTFILE \
+        --mca plm_rsh_args \"-p 2222\" \
         --mca plm_rsh_num_concurrent 600 \
         --mca routed_radix 600 \
         --mca btl_tcp_if_include bond0 \

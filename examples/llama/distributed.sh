@@ -17,16 +17,16 @@ export SEQ_LENGTH=2048
 export GLOBAL_BATCH_SIZE=16
 export MICRO_BATCH_SIZE=1
 
-export HOSTFILE=
-export MASTER_ADDR=localhost # 127.0.0.1
+export HOSTFILE=/workspace/zero-bubble-pipeline-parallelism/examples/llama/hostfile
+export MASTER_ADDR=192.168.0.91
 export NUM_GPUS=8
-# export CUDA_VISIBLE_DEVICES=4,5,6,7
+export CUDA_VISIBLE_DEVICES=4,5,6,7
 
 
 export TP=1
 export CP=1
 export PP=$NUM_GPUS
-export PP_SCHEDULE=dynamic
+export PP_SCHEDULE=1f1b
 export V_SIZE=
 export WAVE_SIZE=1
 export ZERO_BUBBLE_MEM_LIMIT=$((2*$PP))
@@ -35,12 +35,10 @@ export CKPT=no
 
 export CUDA_DEVICE_LOG_LEVEL=warn
 export TORCH_CUDA_LOG_LEVEL=warn
-export TIMER_SAVE_PATH=/workspace/workspace/model/llama/d8-mbs1-dynamic-profile
+export TIMER_SAVE_PATH=/workspace/workspace/model/llama/d8-mbs1-1f1b
 export TIMING_LOG_LEVEL=1
 export PROFILE_STEP_START=500
 export PROFILE_STEP_END=510
-
-export NCCL_COLLNET_ENABLE=0
 
 rm -rf $TIMER_SAVE_PATH/profiler_logs
 ./pretrain_llama.sh
